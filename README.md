@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # 🖥️ RemoteOS
 
@@ -398,4 +398,4 @@ MIT © [nphu211206](https://github.com/nphu211206)
 
 [⬆ Back to top](#-remoteos)
 
-</div>]]>
+</div>
