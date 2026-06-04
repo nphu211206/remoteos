@@ -1,0 +1,74 @@
+# ============================================================
+# RemoteOS — Git Ignore
+# ============================================================
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+*.tsbuildinfo.*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Turbo
+.turbo/
+
+# Database
+*.sqlite
+*.sqlite-journal
+*.db
+prisma/migrations/
+
+# Agent runtime
+agent-data/
+screenshots/
+downloads/
+
+# Temporary
+tmp/
+temp/
+.tmp/
+*.tgz
+
+# Railway / Deploy
+.railway/
+
+# Claude Code
+.claude/
+
+# Data directory
+data/

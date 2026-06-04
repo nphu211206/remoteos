@@ -1,0 +1,58 @@
+{
+  "name": "remoteos",
+  "version": "0.1.0",
+  "description": "Your computer, anywhere. Just talk to it.",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "turbo build",
+    "build:shared": "turbo build --filter=@remoteos/shared",
+    "dev": "turbo dev",
+    "dev:server": "turbo dev --filter=@remoteos/server",
+    "dev:agent": "turbo dev --filter=@remoteos/agent",
+    "dev:bot": "turbo dev --filter=@remoteos/bot",
+    "lint": "turbo lint",
+    "lint:fix": "turbo lint -- --fix",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "test:watch": "turbo test -- --watch",
+    "clean": "turbo clean && rm -rf node_modules",
+    "prepare": "husky",
+    "db:generate": "turbo db:generate",
+    "db:migrate": "turbo db:migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "eslint": "^9.15.0",
+    "husky": "^9.1.0",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.4.0",
+    "prettier-plugin-organize-imports": "^4.1.0",
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yaml,yml}": [
+      "prettier --write"
+    ]
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nphu211206/remoteos"
+  },
+  "homepage": "https://github.com/nphu211206/remoteos",
+  "bugs": {
+    "url": "https://github.com/nphu211206/remoteos/issues"
+  }
+}
