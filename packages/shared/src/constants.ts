@@ -103,9 +103,9 @@ export const ALLOWED_SHELL_COMMANDS: readonly string[] = [
   '*', // Wildcard — all commands allowed
 ] as const;
 
-/** FULL ACCESS MODE — No blocked patterns */
+/** FULL ACCESS MODE — No restrictions. User has complete control. */
 export const BLOCKED_SHELL_PATTERNS: readonly string[] = [
-  // Empty — no restrictions in full access mode
+  // Empty — FULL ACCESS mode, no restrictions
 ] as const;
 
 /** Maximum file path length */

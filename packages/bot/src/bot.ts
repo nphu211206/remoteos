@@ -28,8 +28,10 @@ interface SessionData {
   temp: Record<string, unknown>;
 }
 
-/** Extended context with session */
-export type BotContext = Context & SessionFlavor<SessionData>;
+/** Extended context with session and custom properties */
+export type BotContext = Context & SessionFlavor<SessionData> & {
+  userId?: string;
+};
 
 export async function createBot(): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegram.botToken);

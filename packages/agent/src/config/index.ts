@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { logger } from './logger.js';
 
 function env(key: string, defaultValue?: string): string {
   const value = process.env[key] ?? defaultValue;
@@ -41,8 +42,8 @@ function loadOrCreateIdentity(): DeviceIdentity {
     try {
       const data = JSON.parse(readFileSync(identityPath, 'utf-8'));
       return data as DeviceIdentity;
-    } catch {
-      // Corrupted file, recreate
+    } catch (err) {
+      logger.warn({ err, path: identityPath }, 'Corrupted identity file, recreating');
     }
   }
 

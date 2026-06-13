@@ -137,6 +137,29 @@ export class DeviceService {
   }
 
   /**
+   * Verify a device session token
+   * Returns the device if valid, null otherwise
+   */
+  async verifySession(sessionToken: string): Promise<{ id: string; userId: string } | null> {
+    const db = getDatabase();
+
+    const device = await db.query.devices.findFirst({
+      where: eq(schema.devices.sessionToken, sessionToken),
+    });
+
+    if (!device) {
+      return null;
+    }
+
+    // Check if session has expired
+    if (device.sessionExpiresAt && new Date(device.sessionExpiresAt) < new Date()) {
+      return null;
+    }
+
+    return { id: device.id, userId: device.userId };
+  }
+
+  /**
    * Handle heartbeat from agent
    */
   async handleHeartbeat(request: HeartbeatRequest): Promise<HeartbeatResponse> {

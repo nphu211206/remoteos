@@ -38,10 +38,15 @@ export type CommandType =
   // File operations
   | 'file_list'        // List files in directory
   | 'file_info'        // Get file metadata
+  | 'file_read'        // Read file content
+  | 'file_edit'        // Edit file content (find/replace or rewrite)
   | 'file_download'    // Download file from URL to device
   | 'file_upload'      // Upload file from device to user
   | 'file_search'      // Search for files by name/pattern
   | 'file_delete'      // Delete a file (requires confirmation)
+
+  // Editor
+  | 'open_editor'      // Open file in code editor (VS Code, etc.)
 
   // Shell
   | 'shell'            // Execute whitelisted shell command
@@ -66,6 +71,50 @@ export type CommandType =
 
   // Custom
   | 'custom'           // User-defined command (plugins)
+
+  // Advanced AI
+  | 'screen_vision'     // AI analyzes screenshot
+  | 'desktop_click'     // Click at coordinates
+  | 'desktop_type'      // Type text
+  | 'desktop_keys'      // Press keyboard shortcut
+  | 'desktop_drag'      // Drag from A to B
+  | 'desktop_scroll'    // Scroll
+  | 'browser_open'      // Open URL in browser
+  | 'browser_search'    // Search Google/YouTube
+  | 'browser_navigate'  // Navigate (back, forward, refresh)
+  | 'process_file'      // Process file (PDF, Excel, Word, image)
+  | 'analyze_image'     // Analyze image with AI
+  | 'memory_save'       // Save to memory
+  | 'memory_load'       // Load from memory
+  | 'proactive_suggest' // Get AI suggestions
+  | 'daily_report'      // Generate daily report
+  | 'execute_code'      // Execute code in any language
+  | 'sql_query'         // Execute SQL query
+  | 'data_export'       // Export data to CSV/JSON/Excel
+  | 'generate_chart'    // Generate chart/graph
+  | 'generate_report'   // Generate report (Word/PDF/HTML)
+  | 'plan_task'         // AI Planner - autonomous task planning
+  | 'parallel_tasks'    // Multi-Agent - parallel task execution
+  | 'workflow_create'   // Workflow Builder - create workflow
+  | 'workflow_execute'  // Workflow Builder - execute workflow
+  | 'rag_query'         // RAG System - query knowledge base
+  | 'rag_add_document'  // RAG System - add document
+  | 'security_encrypt'  // Security Layer - encrypt data
+  | 'security_decrypt'  // Security Layer - decrypt data
+  | 'analytics_predict' // Advanced Analytics - predict values
+  | 'analytics_anomaly' // Advanced Analytics - detect anomalies
+  | 'plugin_list'       // Plugin System - list plugins
+  | 'plugin_install'    // Plugin System - install plugin
+  | 'plugin_uninstall'  // Plugin System - uninstall plugin
+  | 'integration_github' // Integration Hub - GitHub operations
+  | 'enterprise_users'   // Enterprise - user management
+  | 'enterprise_teams'   // Enterprise - team management
+  | 'browser_launch'     // Browser Engine - launch browser
+  | 'browser_goto'       // Browser Engine - navigate to URL
+  | 'browser_click'      // Browser Engine - click element
+  | 'browser_type'       // Browser Engine - type text
+  | 'browser_text'       // Browser Engine - get text
+  | 'browser_screenshot' // Browser Engine - take screenshot
 
 /** Danger level determines confirmation requirements */
 export type CommandDangerLevel = 'safe' | 'moderate' | 'dangerous' | 'critical';
@@ -262,6 +311,70 @@ export interface NotifyOutput extends BaseCommandOutput {
   delivered: boolean;
 }
 
+/** File delete output */
+export interface FileDeleteOutput extends BaseCommandOutput {
+  commandType: 'file_delete';
+  path: string;
+  success: boolean;
+  message: string;
+}
+
+/** File search output */
+export interface FileSearchOutput extends BaseCommandOutput {
+  commandType: 'file_search';
+  pattern: string;
+  rootPath: string;
+  results: Array<{
+    path: string;
+    name: string;
+    size: number;
+    isDirectory: boolean;
+    modified: string;
+  }>;
+  totalFound: number;
+}
+
+/** File info output */
+export interface FileInfoOutput extends BaseCommandOutput {
+  commandType: 'file_info';
+  path: string;
+  name: string;
+  extension: string;
+  size: number;
+  isDirectory: boolean;
+  created: string;
+  modified: string;
+  permissions: string;
+}
+
+/** File read output */
+export interface FileReadOutput extends BaseCommandOutput {
+  commandType: 'file_read';
+  path: string;
+  content: string;
+  encoding: string;
+  totalLines: number;
+  truncated: boolean;
+}
+
+/** File edit output */
+export interface FileEditOutput extends BaseCommandOutput {
+  commandType: 'file_edit';
+  path: string;
+  success: boolean;
+  message: string;
+  changesCount: number;
+}
+
+/** Open editor output */
+export interface OpenEditorOutput extends BaseCommandOutput {
+  commandType: 'open_editor';
+  editor: string;
+  path: string;
+  success: boolean;
+  message: string;
+}
+
 /** Union of all command outputs */
 export type CommandOutput =
   | StatusOutput
@@ -271,6 +384,12 @@ export type CommandOutput =
   | FileListOutput
   | ShellOutput
   | NotifyOutput
+  | FileDeleteOutput
+  | FileSearchOutput
+  | FileInfoOutput
+  | FileReadOutput
+  | FileEditOutput
+  | OpenEditorOutput
   | { commandType: string; [key: string]: unknown };
 
 // ─── Polling ───────────────────────────────────────────────────────

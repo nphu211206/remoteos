@@ -45,10 +45,17 @@ export function isSafeDownloadUrl(url: string): boolean {
       hostname === '::1' ||
       hostname.startsWith('192.168.') ||
       hostname.startsWith('10.') ||
-      hostname.startsWith('172.') ||
       hostname.endsWith('.local')
     ) {
       return false;
+    }
+
+    // Check 172.16.0.0/12 range properly
+    if (hostname.startsWith('172.')) {
+      const secondOctet = parseInt(hostname.split('.')[1] ?? '0');
+      if (secondOctet >= 16 && secondOctet <= 31) {
+        return false; // 172.16.0.0 - 172.31.255.255
+      }
     }
 
     return true;
@@ -58,8 +65,8 @@ export function isSafeDownloadUrl(url: string): boolean {
 }
 
 /**
- * Validate a shell command — FULL ACCESS MODE
- * No restrictions. User has granted full system access.
+ * Validate a shell command — SAFETY MODE
+ * Blocks truly dangerous commands while allowing normal usage.
  */
 export function validateShellCommand(command: string): {
   allowed: boolean;
@@ -67,12 +74,34 @@ export function validateShellCommand(command: string): {
 } {
   const trimmed = command.trim();
 
-  // Only block empty commands
+  // Block empty commands
   if (!trimmed) {
     return { allowed: false, reason: 'Empty command' };
   }
 
-  // FULL ACCESS — allow everything
+  // Block excessively long commands
+  if (trimmed.length > 10000) {
+    return { allowed: false, reason: 'Command too long (max 10000 characters)' };
+  }
+
+  // Block truly destructive commands
+  const destructivePatterns = [
+    { pattern: /rm\s+-rf\s+\/\s*$/i, reason: 'Cannot delete root filesystem' },
+    { pattern: /rm\s+-rf\s+\/\*/i, reason: 'Cannot delete all system files' },
+    { pattern: /format\s+[a-z]:\s*$/i, reason: 'Cannot format disk drives' },
+    { pattern: /mkfs\./i, reason: 'Cannot create new filesystem (destructive)' },
+    { pattern: /dd\s+if=.*of=\/dev\//i, reason: 'Cannot write directly to devices' },
+    { pattern: /:\(\)\s*\{\s*:\|:\&\s*\};:/i, reason: 'Fork bomb detected' },
+    { pattern: /shutdown\s+\/[sf]\s*$/i, reason: 'Use sleep/hibernate commands instead' },
+  ];
+
+  for (const { pattern, reason } of destructivePatterns) {
+    if (pattern.test(trimmed)) {
+      return { allowed: false, reason };
+    }
+  }
+
+  // Allow everything else
   return { allowed: true };
 }
 
@@ -89,12 +118,16 @@ export function sanitizePath(path: string): string {
   // Remove leading slashes (prevent absolute path access)
   sanitized = sanitized.replace(/^\/+/, '');
 
-  // Remove directory traversal
+  // Remove directory traversal (multiple passes for nested traversals)
   sanitized = sanitized.replace(/\.\.\//g, '');
   sanitized = sanitized.replace(/\.\.\\/g, '');
+  sanitized = sanitized.replace(/\.\./g, '');
 
   // Remove double slashes
   sanitized = sanitized.replace(/\/+/g, '/');
+
+  // Remove special characters that could be used for injection
+  sanitized = sanitized.replace(/[;&|`$(){}[\]!#]/g, '');
 
   return sanitized;
 }

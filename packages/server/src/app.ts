@@ -14,7 +14,9 @@ import { logger } from './config/logger.js';
 import { initializeDatabase } from './db/index.js';
 import { registerRoutes } from './routes/index.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { rateLimitMiddleware, auditMiddleware } from './middleware/security.js';
 import { AlertService } from './services/alert-service.js';
+import { setupWebSocket } from './websocket.js';
 
 export async function createServer() {
   // ─── Initialize Database ──────────────────────────────────────
@@ -55,6 +57,10 @@ export async function createServer() {
   // ─── Error Handler ─────────────────────────────────────────────
   server.setErrorHandler(errorHandler);
 
+  // ─── Per-User Rate Limiting & Audit Logging ───────────────────
+  server.addHook('onRequest', rateLimitMiddleware);
+  server.addHook('onRequest', auditMiddleware);
+
   // ─── Health Check (before auth) ────────────────────────────────
   server.get('/health', async () => {
     const { getDatabase } = await import('./db/index.js');
@@ -76,6 +82,9 @@ export async function createServer() {
 
   // ─── API Routes ────────────────────────────────────────────────
   await registerRoutes(server);
+
+  // ─── WebSocket (Real-time) ──────────────────────────────────────
+  await setupWebSocket(server);
 
   // ─── Start Alert Monitoring ─────────────────────────────────────
   const alertService = new AlertService();

@@ -5,6 +5,7 @@
  * routes, and graceful shutdown handling.
  */
 
+import './env.js'; // Load .env first
 import { createServer } from './app.js';
 import { config } from './config/index.js';
 import { logger } from './config/logger.js';
@@ -47,4 +48,7 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+main().catch((err) => {
+  logger.fatal({ err }, 'Server startup failed');
+  process.exit(1);
+});

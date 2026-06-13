@@ -62,7 +62,16 @@ export const config = {
 
   /** Security */
   security: {
-    jwtSecret: env('JWT_SECRET', 'dev-secret-change-in-production'),
+    jwtSecret: (() => {
+      const secret = env('JWT_SECRET', 'dev-secret-change-in-production');
+      if (secret === 'dev-secret-change-in-production') {
+        if (env('NODE_ENV', 'development') === 'production') {
+          throw new Error('JWT_SECRET must be set in production environment');
+        }
+        console.warn('⚠️  Using default JWT_SECRET. Set JWT_SECRET env variable for production.');
+      }
+      return secret;
+    })(),
     registrationCode: env('DEVICE_REGISTRATION_CODE', 'remoteos-dev'),
   },
 

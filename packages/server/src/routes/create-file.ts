@@ -43,12 +43,15 @@ export function registerCreateFileRoutes(server: FastifyInstance): void {
         const ext = extname(filename).toLowerCase();
         let cmd = '';
 
+        // Sanitize filepath to prevent command injection
+        const sanitizedPath = filepath.replace(/[;&|`$(){}[\]!#]/g, '');
+
         if (ext === '.py') {
-          cmd = `python "${filepath}"`;
+          cmd = `python "${sanitizedPath}"`;
         } else if (ext === '.js') {
-          cmd = `node "${filepath}"`;
+          cmd = `node "${sanitizedPath}"`;
         } else if (ext === '.html') {
-          cmd = `start "" "${filepath}"`;
+          cmd = `start "" "${sanitizedPath}"`;
         }
 
         if (cmd) {

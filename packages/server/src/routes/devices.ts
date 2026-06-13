@@ -11,6 +11,9 @@ import { DeviceService } from '../services/device-service.js';
 import { CommandService } from '../services/command-service.js';
 import { AuthService } from '../services/auth-service.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { deviceAuthMiddleware } from '../middleware/device-auth.js';
+import { config } from '../config/index.js';
+import { logger } from '../config/logger.js';
 
 const deviceService = new DeviceService();
 const commandService = new CommandService();
@@ -20,6 +23,7 @@ export function registerDeviceRoutes(server: FastifyInstance): void {
   /**
    * POST /devices/register
    * Agent calls this to register/pair with the server
+   * Requires valid registration code
    */
   server.post('/devices/register', async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = deviceRegisterRequestSchema.safeParse(req.body);
@@ -27,6 +31,15 @@ export function registerDeviceRoutes(server: FastifyInstance): void {
       return reply.status(400).send({
         success: false,
         error: { code: 'VALIDATION_ERROR', message: 'Invalid registration data', details: parsed.error.flatten() },
+      });
+    }
+
+    // Validate registration token
+    if (parsed.data.registrationToken !== config.security.registrationCode) {
+      logger.warn({ token: parsed.data.registrationToken }, 'Invalid registration token attempt');
+      return reply.status(403).send({
+        success: false,
+        error: { code: 'INVALID_TOKEN', message: 'Invalid registration token' },
       });
     }
 
@@ -68,8 +81,9 @@ export function registerDeviceRoutes(server: FastifyInstance): void {
   /**
    * POST /device/heartbeat
    * Agent sends periodic heartbeat with system state
+   * Requires valid session token
    */
-  server.post('/device/heartbeat', async (req: FastifyRequest, reply: FastifyReply) => {
+  server.post('/device/heartbeat', { preHandler: deviceAuthMiddleware }, async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = heartbeatRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -85,8 +99,9 @@ export function registerDeviceRoutes(server: FastifyInstance): void {
   /**
    * POST /device/poll
    * Agent polls for pending commands
+   * Requires valid session token
    */
-  server.post('/device/poll', async (req: FastifyRequest, reply: FastifyReply) => {
+  server.post('/device/poll', { preHandler: deviceAuthMiddleware }, async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = pollRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({

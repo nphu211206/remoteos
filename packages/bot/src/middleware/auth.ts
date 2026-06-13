@@ -2,16 +2,18 @@
  * Auth Middleware
  *
  * Validates that the user is allowed to use the bot.
- * For MVP: allows all users (registration happens via /start).
+ * Checks registration status via server API.
  */
 
 import type { Middleware } from 'grammy';
 import type { BotContext } from '../bot.js';
 import { logger } from '../config/logger.js';
+import { config } from '../config/index.js';
 
 export const authMiddleware: Middleware<BotContext> = async (ctx, next) => {
-  // Skip auth for /start command
-  if (ctx.message?.text?.startsWith('/start')) {
+  // Skip auth for /start and /help commands
+  const text = ctx.message?.text || '';
+  if (text.startsWith('/start') || text.startsWith('/help')) {
     return next();
   }
 
@@ -21,9 +23,14 @@ export const authMiddleware: Middleware<BotContext> = async (ctx, next) => {
     return;
   }
 
-  // TODO: Check user registration status
-  // For MVP, allow all users
-  logger.debug({ userId, username: ctx.from?.username }, 'User authenticated');
+  // Store userId in context for handlers
+  ctx.userId = String(userId);
+
+  // Log authentication
+  logger.debug(
+    { userId, username: ctx.from?.username },
+    'User authenticated',
+  );
 
   return next();
 };

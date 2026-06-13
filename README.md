@@ -1,401 +1,522 @@
 <div align="center">
 
-# 🖥️ RemoteOS
+<img width="100%" src="https://capsule-render.vercel.app/api?type=waving&color=0:0a0a0f,50:667eea,100:764ba2&height=220&section=header&text=RemoteOS&fontSize=80&fontColor=ffffff&animation=fadeIn&fontAlignY=35&desc=Your%20Computer%2C%20Anywhere.%20Just%20Talk%20to%20It.&descSize=18&descAlignY=55" />
 
-### *Your computer, anywhere. Just talk to it.*
+<br>
 
-<br/>
+<img src="https://img.shields.io/badge/⚡_RemoteOS-v5.0-blueviolet?style=for-the-badge&logo=terminal&logoColor=white" alt="RemoteOS">&nbsp;
+<img src="https://img.shields.io/badge/🧠_AI-Powered-ff6b6b?style=for-the-badge&logo=google&logoColor=white" alt="AI Powered">&nbsp;
+<img src="https://img.shields.io/badge/🖥️_Control-PC-4ecdc4?style=for-the-badge&logo=windows&logoColor=white" alt="PC Control">
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Fastify](https://img.shields.io/badge/Fastify-5-000000?style=flat-square&logo=fastify&logoColor=white)](https://fastify.dev/)
-[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
-[![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?style=flat-square&logo=telegram&logoColor=white)](https://t.me)
+<br><br>
 
-<br/>
+<h3>🚀 Control your computer from anywhere using <b>natural language</b></h3>
+<p>Through <b>Telegram</b> • <b>Discord</b> • <b>Web Dashboard</b></p>
 
-**RemoteOS** is an AI-powered remote computer control system.
-Control your PC from anywhere through natural language conversation.
+<br>
 
-No terminal. No remote desktop. Just talk.
+<a href="https://github.com/nphu211206/remoteos/stargazers"><img src="https://img.shields.io/github/stars/nphu211206/remoteos?color=ffd700&style=for-the-badge" alt="Stars"></a>
+<a href="https://github.com/nphu211206/remoteos/network/members"><img src="https://img.shields.io/github/forks/nphu211206/remoteos?color=667eea&style=for-the-badge" alt="Forks"></a>
+<a href="https://github.com/nphu211206/remoteos/issues"><img src="https://img.shields.io/github/issues/nphu211206/remoteos?color=ff6b6b&style=for-the-badge" alt="Issues"></a>
+<a href="https://github.com/nphu211206/remoteos/blob/main/LICENSE"><img src="https://img.shields.io/github/license/nphu211206/remoteos?color=4ecdc4&style=for-the-badge" alt="License"></a>
 
-<br/>
+<br><br>
 
-```
-You: "máy tính thế nào?"
-Bot: 🖥️ CPU 45% | RAM 8.2/16 GB | Disk 234/500 GB
-
-You: "tạo file Python quản lý sinh viên 500 dòng"
-Bot: ✅ Đã tạo student_manager.py (584 dòng, 22KB)
-
-You: "phân tích thị trường AI 2025"
-Bot: 📖 Báo cáo chi tiết: 2000+ từ, 5 sections...
-
-You: "tạo dự án React tên my-app"
-Bot: ✅ Đã tạo 9 files — npm install && npm run dev
-```
-
-<br/>
-
-[Features](#-features) •
-[Quick Start](#-quick-start) •
-[Architecture](#-architecture) •
-[API](#-api) •
-[Tech Stack](#-tech-stack)
+<img src="https://img.shields.io/badge/Build-Passing-brightgreen?style=flat-square" alt="Build">
+<img src="https://img.shields.io/badge/Tests-157/157-brightgreen?style=flat-square" alt="Tests">
+<img src="https://img.shields.io/badge/Packages-6/6-brightgreen?style=flat-square" alt="Packages">
+<img src="https://img.shields.io/badge/Modules-31-blue?style=flat-square" alt="Modules">
+<img src="https://img.shields.io/badge/API_Endpoints-15-orange?style=flat-square" alt="APIs">
 
 </div>
 
----
-
-## 🎯 What is RemoteOS?
-
-RemoteOS lets you control your computer from anywhere using natural language. It's not remote desktop. It's not terminal. It's a new paradigm — **talk to your computer like talking to a genius assistant**.
-
-> *"The first product that allows natural language computer control via chat."*
-
-### Why RemoteOS?
-
-| Problem | Existing Solutions | RemoteOS |
-|---------|-------------------|----------|
-| Need to access files remotely | Google Drive (must upload first) | Just ask: "gửi file báo cáo" |
-| Need to control PC remotely | TeamViewer (heavy, need screen) | Just talk: "mở VS Code" |
-| Need to run commands remotely | SSH (must know commands) | Just say: "restart Docker" |
-| Need to monitor PC remotely | No good solution | Just ask: "máy tính thế nào?" |
-
----
-
-## ✨ Features
-
-### 🧠 AI Intelligence
-
-- **Natural Language** — Vietnamese & English, understands context
-- **Multi-Turn Conversation** — AI asks clarifying questions
-- **Error Recovery** — Auto-analyzes and retries failed commands
-- **Context Memory** — Remembers 50 messages, pronoun resolution
-- **Compound Requests** — "tạo file rồi mở VS Code"
-- **Smart Model Routing** — Auto-selects best AI model per task
-
-### 💻 39 Computer Control Capabilities
-
-| Category | Commands |
-|----------|----------|
-| **System** | Status, Screenshot, Processes, System Info |
-| **Files** | Create, Read, Edit, List, Download, Multi-file |
-| **Apps** | Launch, Close, List (60+ apps) |
-| **Shell** | Any command — pipes, chains, redirects |
-| **Control** | Volume, Clipboard, Lock Screen, Notifications |
-| **AI** | Code Generation, Research Reports, Web Search |
-| **Projects** | React, Next.js, Express, Flask, FastAPI scaffolding |
-| **Automation** | Cron Scheduler, Batch Commands, Device Groups |
-
-### 🌐 Multi-Platform
-
-| Platform | Status |
-|----------|--------|
-| **Telegram Bot** | ✅ Full feature set |
-| **Discord Bot** | ✅ Slash commands |
-| **Web Dashboard** | ✅ Next.js dark theme |
-| **REST API** | ✅ Full API |
-| **Streaming (SSE)** | ✅ Real-time responses |
-
-### 🔌 Multi-Provider AI
-
-| Provider | Models |
-|----------|--------|
-| **Google Gemini** | 2.5 Flash, 3.1 Flash Lite, Pro |
-| **OpenAI** | GPT-4o, GPT-4o Mini |
-| **Anthropic** | Claude Sonnet, Haiku, Opus |
-| **Local LLM** | Ollama (Llama3, Mistral) |
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) 18+
-- [pnpm](https://pnpm.io/) 9+
-- [Telegram Bot Token](https://t.me/BotFather)
-- [Gemini API Key](https://aistudio.google.com/apikey)
-
-### Installation
-
-```bash
-# Clone
-git clone https://github.com/nphu211206/remoteos.git
-cd remoteos
-
-# Install
-pnpm install
-
-# Configure
-cp .env.example .env
-# Edit .env with your tokens
-
-# Build
-pnpm build
-
-# Run
-pnpm dev
-```
-
-### Environment Variables
-
-```env
-# Telegram
-TELEGRAM_BOT_TOKEN=your_bot_token
-
-# AI
-GEMINI_API_KEY=your_api_key
-GEMINI_MODEL=gemini-3.1-flash-lite
-
-# Server
-SERVER_HOST=0.0.0.0
-SERVER_PORT=3000
-
-# Security
-JWT_SECRET=your-secret
-DEVICE_REGISTRATION_CODE=your-code
-```
-
-### Start Services
-
-```bash
-# Terminal 1: Server
-pnpm dev:server
-
-# Terminal 2: Agent (on your PC)
-pnpm dev:agent
-
-# Terminal 3: Telegram Bot
-pnpm dev:bot
-
-# Terminal 4: Web Dashboard (optional)
-pnpm dev:dashboard
-```
-
-Then open Telegram, find your bot, and send `/start`!
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         USER INTERFACES                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
-│  │ Telegram │  │ Discord  │  │ Web UI   │  │ REST API │       │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
-│       └──────────────┼──────────────┼──────────────┘            │
-│                      ▼                                          │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              RELAY SERVER (Fastify + SQLite)              │   │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │   │
-│  │  │REST API│ │AI Engine│ │Scheduler│ │Stream  │ │Auth JWT│ │   │
-│  │  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │   │
-│  └───────────────────────┬──────────────────────────────────┘   │
-│                          │ HTTP Polling                         │
-│  ┌───────────────────────▼──────────────────────────────────┐   │
-│  │                  AGENT (PC Daemon)                        │   │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │   │
-│  │  │System  │ │File    │ │Shell   │ │App     │ │Screen  │ │   │
-│  │  │Monitor │ │Manager │ │Executor│ │Launcher│ │Capture │ │   │
-│  │  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 📁 Project Structure
-
-```
-remoteos/
-├── packages/
-│   ├── shared/              # Types, constants, validators
-│   ├── server/              # Relay server (Fastify)
-│   ├── agent/               # PC daemon
-│   ├── bot/                 # Telegram bot
-│   ├── web-dashboard/       # Next.js web UI
-│   └── discord-bot/         # Discord bot
-├── docs/                    # Documentation
-├── scripts/                 # Utility scripts
-├── turbo.json               # Turborepo config
-├── pnpm-workspace.yaml      # pnpm workspace
-└── package.json             # Root package
-```
-
----
-
-## 🔌 API Reference
-
-### Core
-
-```bash
-# AI interpretation + execution
-POST /api/v1/interpret-and-execute
-Body: { "text": "tạo file calculator.py" }
-
-# Streaming response (SSE)
-POST /api/v1/stream
-Body: { "text": "viết báo cáo về AI" }
-
-# Health check
-GET /health
-```
-
-### Devices
-
-```bash
-# List devices
-GET /api/v1/devices
-
-# All device status
-GET /api/v1/devices/all/status
-
-# Batch command
-POST /api/v1/devices/batch
-Body: { "commandType": "screenshot", "allOnline": true }
-```
-
-### Automation
-
-```bash
-# Create schedule
-POST /api/v1/schedules
-Body: { "name": "Daily screenshot", "schedule": "mỗi 8h sáng", "commandType": "screenshot", "deviceId": "..." }
-
-# List schedules
-GET /api/v1/schedules
-```
-
----
-
-## 🛠️ Tech Stack
-
-| Component | Technology | Why |
-|-----------|------------|-----|
-| **Runtime** | Node.js 18+ | Cross-platform, fast |
-| **Language** | TypeScript 5.7 | Type safety |
-| **Server** | Fastify 5 | 2x faster than Express |
-| **Database** | SQLite + Drizzle | Zero config, portable |
-| **Telegram** | grammY | Best TS bot framework |
-| **Discord** | discord.js | Official library |
-| **Web** | Next.js 14 | React + SSR |
-| **AI** | Gemini API | Free tier, powerful |
-| **Build** | Turborepo | Fast monorepo builds |
-| **Package** | pnpm 9 | Efficient disk usage |
-
----
-
-## 📊 Example Commands
-
-### System
-```
-"máy tính thế nào?"          → CPU, RAM, Disk, Uptime
-"chụp màn hình"              → Screenshot
-"xem tiến trình"             → Process list
-"kiểm tra CPU"               → CPU details
-```
-
-### Files
-```
-"tạo file calculator.py"     → Create Python file
-"đọc file index.html"        → Read file content
-"sửa title trong file X"     → Edit file
-"xem thư mục Desktop"        → List files
-```
-
-### Code Generation
-```
-"tạo website bán hàng 5 file"       → Multi-file project
-"viết Python 500 dòng quản lý SV"   → Long code
-"tạo dự án React"                    → React scaffolding
-"tạo dự án Express API"              → Express scaffolding
-```
-
-### Research
-```
-"phân tích thị trường AI 2025"       → Detailed report
-"tìm kiếm giá Bitcoin"              → Web search
-"viết báo cáo về crypto"            → Research report
-```
-
-### Automation
-```
-"tạo lịch chụp màn hình 8h sáng"   → Schedule task
-"mỗi ngày backup dữ liệu"          → Daily backup
-"xem lịch"                          → List schedules
-```
-
-### Multi-Device
-```
-"kiểm tra tất cả máy"              → All device status
-"chụp màn hình tất cả máy"        → Batch screenshot
-"tạo nhóm work"                    → Device group
-```
-
----
-
-## 🔒 Security
-
-- **JWT Authentication** — Secure API access
-- **Device Registration** — Token-based pairing
-- **Rate Limiting** — 300 requests/minute
-- **Input Validation** — Zod schemas
-- **AES-256 Encryption** — API keys at rest
-- **Full Access Mode** — User-controlled
-
----
-
-## 🧪 Testing
-
-```bash
-pnpm test              # All tests
-pnpm typecheck         # Type checking
-pnpm lint              # Linting
-pnpm format            # Formatting
-```
-
----
-
-## 📈 Roadmap
-
-- [x] Phase 0: MVP (Agent, Server, Bot)
-- [x] Phase 1: AI Engine, Advanced Commands
-- [x] Phase 2: Multi-Turn, Error Recovery, Streaming
-- [x] Phase 3: Scheduler, File Transfer, Project Scaffolding
-- [x] Phase 4: Web Dashboard, Voice Input, Image Understanding
-- [x] Phase 5: Multi-Device, Collaboration, Discord Bot
-- [ ] Phase 6: WebSocket Real-Time, Mobile App
-- [ ] Phase 7: Plugin System, Marketplace
-
----
-
-## 🤝 Contributing
-
-```bash
-# Fork & clone
-git checkout -b feature/my-feature
-git commit -m "Add my feature"
-git push origin feature/my-feature
-# Open Pull Request
-```
-
----
-
-## 📄 License
-
-MIT © [nphu211206](https://github.com/nphu211206)
+<br>
 
 ---
 
 <div align="center">
 
-**Made with ❤️ by [nphu211206](https://github.com/nphu211206)**
+## 🎬 Demo
 
-*Your computer, anywhere. Just talk to it.*
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                                                                    │
+│  👤 "Tạo file Python tính BMI cho tôi"                            │
+│                                                                    │
+│  🤖 ✅ Đã tạo file bmi.py trên Desktop!                           │
+│                                                                    │
+│     📄 Code:                                                       │
+│     ┌──────────────────────────────────────────────────────────┐   │
+│     │ def bmi(weight, height):                                 │   │
+│     │     return weight / (height ** 2)                        │   │
+│     │                                                          │   │
+│     │ print(bmi(70, 1.75))  # → 22.9 (Normal)                 │   │
+│     └──────────────────────────────────────────────────────────┘   │
+│                                                                    │
+│     🏃 Đã chạy thử: BMI = 22.9 → Normal 💪                       │
+│                                                                    │
+│  👤 "Chụp màn hình cho tôi xem"                                   │
+│                                                                    │
+│  🤖 📸 Đã chụp! Đây là màn hình hiện tại:                        │
+│     [Ảnh chụp màn hình]                                           │
+│                                                                    │
+│  👤 "Máy tính thế nào?"                                           │
+│                                                                    │
+│  🤖 🖥️ Máy tính của bạn đang rất tốt!                            │
+│     🔲 CPU   ████████░░░░░░░ 55.2%                                │
+│     💾 RAM   ███████░░░░░░░░ 14.2/31.8 GB                         │
+│     💿 Disk  ██████████████░ 666.7/704 GB                         │
+│     ⏱️ Uptime: 3h 6m                                              │
+│     📊 Processes: 319                                              │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
 
-[⬆ Back to top](#-remoteos)
+</div>
+
+<br>
+
+---
+
+<div align="center">
+
+## ✨ Features That Blow Your Mind
+
+</div>
+
+<table>
+<tr>
+<td width="50%">
+
+### 🧠 AI Engine
+- 🎯 **Function Calling** — 22 native Gemini functions
+- 🌊 **Streaming** — Real-time like ChatGPT
+- 👁️ **Vision API** — Analyze screenshots
+- 💝 **Emotional Intelligence** — Detect & adapt
+- 📚 **Learning System** — Learn user patterns
+- 🧠 **Context Memory** — Remember conversations
+- 🔄 **Multi-provider** — Gemini/OpenAI/Anthropic/Ollama
+- ✅ **Code Verification** — Auto-run after creation
+
+</td>
+<td width="50%">
+
+### 🖥️ Computer Control
+- 📊 **System Status** — CPU, RAM, Disk, Network
+- 📸 **Screenshot** — Capture & analyze screen
+- 🔧 **Process Manager** — List & kill processes
+- 💻 **Shell Execution** — Run any command
+- 📁 **File Operations** — Create, read, edit, delete
+- 🚀 **App Launcher** — Open any application
+- 🖱️ **Desktop Automation** — Click, type, drag
+- 🌐 **Browser Control** — Navigate, search
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 🎯 Smart Features
+- 📚 **RAG Knowledge Base** — Search your docs
+- 🔄 **Workflow Automation** — 6 built-in workflows
+- 🧩 **Plugin System** — 10 built-in plugins
+- 🎤 **Voice Commands** — Whisper integration
+- 📊 **Data Pipeline** — SQL, CSV, JSON, charts
+- 📄 **Report Generator** — PDF, Word, Excel, PPT
+- 🤖 **Multi-Agent** — 8 specialized agents
+- 🔮 **Predictive Analytics** — ML predictions
+
+</td>
+<td width="50%">
+
+### 🔒 Security
+- 🔐 **JWT Authentication** — Secure API access
+- 🛡️ **Rate Limiting** — 30 RPM per user
+- 📝 **Audit Logging** — Track all API calls
+- 🔒 **Input Sanitization** — Prevent injection
+- 🖥️ **Device Auth** — Session verification
+- 🔑 **Registration Code** — Secure pairing
+- 🚫 **Command Filtering** — Block dangerous ops
+- 🔍 **SQL Injection Detection** — Real-time
+
+</td>
+</tr>
+</table>
+
+<br>
+
+---
+
+<div align="center">
+
+## 🏗️ Architecture
+
+</div>
+
+```
+                         ┌─────────────────────────┐
+                         │       👤 User           │
+                         └───────────┬─────────────┘
+                                     │
+                    ┌────────────────┼────────────────┐
+                    │                │                │
+                    ▼                ▼                ▼
+             ┌────────────┐   ┌────────────┐   ┌────────────┐
+             │  📱 Telegram│   │  🎮 Discord │   │  🌐 Web    │
+             │     Bot    │   │     Bot    │   │ Dashboard  │
+             │   (grammY) │   │ (discord.js)│   │  (Next.js) │
+             └─────┬──────┘   └─────┬──────┘   └─────┬──────┘
+                   │                │                │
+                   └────────────────┼────────────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │    🖧  Server         │
+                         │    (Fastify)        │
+                         │    Port 3000        │
+                         │                     │
+                         │  • JWT Auth         │
+                         │  • Rate Limiting    │
+                         │  • Audit Logging    │
+                         │  • WebSocket        │
+                         └──────────┬──────────┘
+                                    │
+                   ┌────────────────┼────────────────┐
+                   │                │                │
+                   ▼                ▼                ▼
+            ┌────────────┐   ┌────────────┐   ┌────────────┐
+            │  🧠 Gemini │   │  💾 SQLite  │   │  🤖 Agent  │
+            │     AI     │   │     DB     │   │   Daemon   │
+            │            │   │            │   │            │
+            │ • Function │   │ • Users    │   │ • 31 Modules│
+            │   Calling  │   │ • Devices  │   │ • Polling  │
+            │ • Streaming│   │ • Commands │   │ • Heartbeat│
+            │ • Vision   │   │ • Context  │   │ • Execute  │
+            └────────────┘   └────────────┘   └─────┬──────┘
+                                                     │
+                                                     ▼
+                                           ┌──────────────────┐
+                                           │   💻 Computer    │
+                                           │   (User's PC)    │
+                                           │                  │
+                                           │  • Windows/Mac/  │
+                                           │    Linux         │
+                                           │  • Full Control  │
+                                           │  • Real-time     │
+                                           └──────────────────┘
+```
+
+<br>
+
+---
+
+<div align="center">
+
+## 📦 Monorepo Packages
+
+</div>
+
+<table>
+<tr>
+<td align="center" width="16%">
+<img src="https://img.shields.io/badge/📦-shared-blue?style=for-the-badge" alt="shared"><br>
+<b>@remoteos/shared</b><br>
+<sub>Types • Constants • Validators • Utils</sub><br>
+<sub>TypeScript • Zod</sub>
+</td>
+<td align="center" width="16%">
+<img src="https://img.shields.io/badge/🖥️-server-green?style=for-the-badge" alt="server"><br>
+<b>@remoteos/server</b><br>
+<sub>Fastify • SQLite • AI Engine</sub><br>
+<sub>Fastify • Drizzle ORM</sub>
+</td>
+<td align="center" width="16%">
+<img src="https://img.shields.io/badge/🤖-agent-orange?style=for-the-badge" alt="agent"><br>
+<b>@remoteos/agent</b><br>
+<sub>31 Modules • Daemon</sub><br>
+<sub>Node.js • systeminformation</sub>
+</td>
+<td align="center" width="16%">
+<img src="https://img.shields.io/badge/📱-bot-cyan?style=for-the-badge" alt="bot"><br>
+<b>@remoteos/bot</b><br>
+<sub>Telegram • Voice • Photo</sub><br>
+<sub>grammY • axios</sub>
+</td>
+<td align="center" width="16%">
+<img src="https://img.shields.io/badge/🌐-dashboard-purple?style=for-the-badge" alt="dashboard"><br>
+<b>@remoteos/dashboard</b><br>
+<sub>Real-time • 8 Tabs</sub><br>
+<sub>Next.js 14 • React 18</sub>
+</td>
+<td align="center" width="16%">
+<img src="https://img.shields.io/badge/🎮-discord-indigo?style=for-the-badge" alt="discord"><br>
+<b>@remoteos/discord</b><br>
+<sub>Slash Commands</sub><br>
+<sub>discord.js</sub>
+</td>
+</tr>
+</table>
+
+<br>
+
+---
+
+<div align="center">
+
+## 🚀 Quick Start
+
+</div>
+
+```bash
+# 1️⃣ Clone
+git clone https://github.com/nphu211206/remoteos.git
+cd remoteos
+
+# 2️⃣ Install
+pnpm install
+
+# 3️⃣ Configure
+cp .env.example .env
+# Edit .env with your GEMINI_API_KEY
+
+# 4️⃣ Build
+pnpm build
+
+# 5️⃣ Start Server
+cd packages/server && npx tsx src/index.ts
+
+# 6️⃣ Start Agent (on target computer)
+cd packages/agent && npx tsx src/index.ts
+
+# 7️⃣ Open Dashboard
+# → http://localhost:3001
+```
+
+<br>
+
+---
+
+<div align="center">
+
+## 🎯 Usage Examples
+
+</div>
+
+<table>
+<tr>
+<td width="50%">
+
+### 💬 Natural Language
+```
+"máy tính thế nào?"      → System status
+"chụp màn hình"          → Screenshot
+"tạo file Python hello"  → Create & run code
+"đọc file báo cáo.docx"  → Read Word file
+"tìm file *.py"          → Search files
+"mở Chrome"              → Launch app
+"khóa màn hình"          → Lock screen
+```
+
+</td>
+<td width="50%">
+
+### 🤖 Telegram Commands
+```
+/start      → Welcome message
+/help       → Show all commands
+/status     → System status
+/screenshot → Take screenshot
+/processes  → List processes
+/devices    → Select device
+/ai         → Configure AI
+/dashboard  → System overview
+```
+
+</td>
+</tr>
+</table>
+
+<br>
+
+---
+
+<div align="center">
+
+## 🧠 AI Capabilities
+
+</div>
+
+<table>
+<tr>
+<td align="center" width="25%">
+<h3>🎯 Function Calling</h3>
+<p>22 native Gemini functions for precise computer control</p>
+</td>
+<td align="center" width="25%">
+<h3>🌊 Streaming</h3>
+<p>Real-time AI responses like ChatGPT</p>
+</td>
+<td align="center" width="25%">
+<h3>👁️ Vision API</h3>
+<p>Analyze screenshots with Gemini Vision</p>
+</td>
+<td align="center" width="25%">
+<h3>💝 Emotional AI</h3>
+<p>Detect user emotion & adapt responses</p>
+</td>
+</tr>
+<tr>
+<td align="center" width="25%">
+<h3>📚 Learning</h3>
+<p>Learn user patterns & preferences</p>
+</td>
+<td align="center" width="25%">
+<h3>🧠 Context</h3>
+<p>Remember conversation history</p>
+</td>
+<td align="center" width="25%">
+<h3>🔄 Multi-provider</h3>
+<p>Gemini • OpenAI • Anthropic • Ollama</p>
+</td>
+<td align="center" width="25%">
+<h3>✅ Code Verify</h3>
+<p>Auto-run code after creation</p>
+</td>
+</tr>
+</table>
+
+<br>
+
+---
+
+<div align="center">
+
+## 🧪 Testing
+
+</div>
+
+```bash
+pnpm test  # Run all 157 tests
+```
+
+<table>
+<tr>
+<td align="center"><b>Package</b></td>
+<td align="center"><b>Tests</b></td>
+<td align="center"><b>Status</b></td>
+</tr>
+<tr>
+<td align="center">@remoteos/shared</td>
+<td align="center">110</td>
+<td align="center">✅</td>
+</tr>
+<tr>
+<td align="center">@remoteos/server</td>
+<td align="center">47</td>
+<td align="center">✅</td>
+</tr>
+<tr>
+<td align="center">@remoteos/agent</td>
+<td align="center">3</td>
+<td align="center">✅</td>
+</tr>
+<tr>
+<td align="center">@remoteos/bot</td>
+<td align="center">3</td>
+<td align="center">✅</td>
+</tr>
+<tr>
+<td align="center"><b>Total</b></td>
+<td align="center"><b>157</b></td>
+<td align="center"><b>✅</b></td>
+</tr>
+</table>
+
+<br>
+
+---
+
+<div align="center">
+
+## 🗺️ Roadmap
+
+</div>
+
+- [x] 🎯 AI Function Calling (22 functions)
+- [x] 🌊 Streaming Responses
+- [x] 👁️ Vision API Integration
+- [x] 📚 RAG Knowledge Base
+- [x] 🔄 Workflow Automation (6 workflows)
+- [x] 🧩 Plugin System (10 plugins)
+- [x] 💝 Emotional Intelligence
+- [x] ✅ Code Verification
+- [x] 🧠 Learning System
+- [x] 📊 Real-time Dashboard
+- [ ] 🎤 Voice Commands (Whisper)
+- [ ] 📱 Multi-device Orchestration UI
+- [ ] 📲 Mobile App
+
+<br>
+
+---
+
+<div align="center">
+
+## 📊 Tech Stack
+
+</div>
+
+<div align="center">
+
+<img src="https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
+<img src="https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js">
+<img src="https://img.shields.io/badge/Fastify-000000?style=for-the-badge&logo=fastify&logoColor=white" alt="Fastify">
+<img src="https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js">
+<img src="https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React">
+<img src="https://img.shields.io/badge/SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white" alt="SQLite">
+<img src="https://img.shields.io/badge/Google_Gemini-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Gemini">
+<img src="https://img.shields.io/badge/Telegram-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram">
+<img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord">
+<img src="https://img.shields.io/badge/Vitest-6E9F18?style=for-the-badge&logo=vitest&logoColor=white" alt="Vitest">
+<img src="https://img.shields.io/badge/Turborepo-EE4B2B?style=for-the-badge&logo=turborepo&logoColor=white" alt="Turborepo">
+<img src="https://img.shields.io/badge/pnpm-F69220?style=for-the-badge&logo=pnpm&logoColor=white" alt="pnpm">
+
+</div>
+
+<br>
+
+---
+
+<div align="center">
+
+## 🙏 Acknowledgments
+
+[![Gemini AI](https://img.shields.io/badge/Gemini_AI-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
+[![Fastify](https://img.shields.io/badge/Fastify-000000?style=for-the-badge&logo=fastify&logoColor=white)](https://fastify.dev/)
+[![grammY](https://img.shields.io/badge/grammY-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://grammy.dev/)
+[![Next.js](https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Drizzle ORM](https://img.shields.io/badge/Drizzle_ORM-C5F74F?style=for-the-badge&logo=drizzle&logoColor=black)](https://orm.drizzle.team/)
+
+</div>
+
+<br>
+
+---
+
+<div align="center">
+
+## 📄 License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+<br>
+
+---
+
+### Made with ❤️ by [nphu211206](https://github.com/nphu211206)
+
+<br>
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0a0a0f,50:667eea,100:764ba2&height=120&section=footer" width="100%" />
 
 </div>

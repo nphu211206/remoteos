@@ -16,13 +16,15 @@ export function generateToken(length = 32): string {
 }
 
 /**
- * Generate a short numeric code (for device pairing)
+ * Generate a cryptographically secure numeric code (for device pairing)
  * @param digits - Number of digits (default 6)
  */
 export function generateNumericCode(digits = 6): string {
   const min = Math.pow(10, digits - 1);
   const max = Math.pow(10, digits) - 1;
-  return String(Math.floor(Math.random() * (max - min + 1)) + min);
+  // Use crypto.randomInt for cryptographic security
+  const { randomInt } = require('node:crypto');
+  return String(randomInt(min, max + 1));
 }
 
 /**

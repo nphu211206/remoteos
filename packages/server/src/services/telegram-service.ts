@@ -164,7 +164,7 @@ export class TelegramService {
 
     switch (cmd) {
       case '/start':
-        await this.handleStart(chatId, message_from_firstName(args));
+        await this.handleStart(chatId, undefined);
         break;
       case '/help':
         await this.handleHelp(chatId);
@@ -946,7 +946,3 @@ export class TelegramService {
 }
 
 // ─── Utility ──────────────────────────────────────────────────────
-
-function message_from_firstName(args: string[]): string | undefined {
-  return undefined; // firstName comes from the message object, not args
-}

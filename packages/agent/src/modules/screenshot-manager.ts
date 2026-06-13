@@ -37,12 +37,26 @@ export class ScreenshotManager {
       const buffer = await readFileAsync(tmpFile);
       await unlinkAsync(tmpFile).catch(() => {});
 
+      // Detect screen resolution
+      let width = 1920;
+      let height = 1080;
+      try {
+        const si = await import('systeminformation');
+        const graphics = await si.default.graphics();
+        if (graphics.displays && graphics.displays.length > 0) {
+          width = graphics.displays[0]?.resolutionX ?? 1920;
+          height = graphics.displays[0]?.resolutionY ?? 1080;
+        }
+      } catch {
+        // Use default resolution
+      }
+
       return {
         commandType: 'screenshot',
         imageData: buffer.toString('base64'),
         format: 'png',
-        width: 1920, // TODO: Detect actual resolution
-        height: 1080,
+        width,
+        height,
         sizeBytes: buffer.length,
       };
     } catch (err) {

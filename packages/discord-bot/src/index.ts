@@ -15,12 +15,28 @@ import axios from 'axios';
 // ─── Configuration ─────────────────────────────────────────────
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN ?? '';
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? '';
 const SERVER_URL = process.env.SERVER_URL ?? 'http://localhost:3000';
 const API_BASE = `${SERVER_URL}/api/v1`;
 
+if (!DISCORD_TOKEN) {
+  console.error('Missing DISCORD_TOKEN environment variable');
+  process.exit(1);
+}
+if (!DISCORD_CLIENT_ID) {
+  console.error('Missing DISCORD_CLIENT_ID environment variable');
+  process.exit(1);
+}
+
 // ─── API Client ────────────────────────────────────────────────
 
-async function api(path: string, options?: any) {
+interface ApiOptions {
+  method?: string;
+  data?: unknown;
+  headers?: Record<string, string>;
+}
+
+async function api(path: string, options?: ApiOptions) {
   try {
     const response = await axios(`${API_BASE}${path}`, {
       ...options,
@@ -28,9 +44,10 @@ async function api(path: string, options?: any) {
       timeout: 120000,
     });
     return response.data;
-  } catch (err: any) {
-    console.error(`API Error: ${err.message}`);
-    return { success: false, error: err.message };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`API Error: ${message}`);
+    return { success: false, error: message };
   }
 }
 
@@ -93,7 +110,7 @@ async function registerCommands() {
   try {
     console.log('Registering slash commands...');
     await rest.put(
-      Routes.applicationCommands('YOUR_CLIENT_ID'), // Replace with your bot's client ID
+      Routes.applicationCommands(DISCORD_CLIENT_ID),
       { body: commands.map(cmd => cmd.toJSON()) },
     );
     console.log('Slash commands registered!');
@@ -188,8 +205,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const data = await api('/devices');
 
         if (data?.data?.devices) {
-          const devices = data.data.devices;
-          const lines = devices.map((d: any) => {
+          const devices = data.data.devices as Array<{ name: string; status: string; os: string }>;
+          const lines = devices.map((d) => {
             const icon = d.status === 'online' ? '🟢' : '🔴';
             return `${icon} ${d.name} (${d.os})`;
           });

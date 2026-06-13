@@ -13,6 +13,11 @@ import { registerUserSettingsRoutes } from './user-settings.js';
 import { registerCreateFileRoutes } from './create-file.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerMultiDeviceRoutes } from './multi-device.js';
+import { registerVoiceRoutes } from './voice.js';
+import { registerAnalyticsRoutes } from './analytics.js';
+import { registerRAGRoutes } from './rag.js';
+import { registerPluginRoutes } from './plugins.js';
+import { registerWorkflowRoutes } from './workflows.js';
 
 export async function registerRoutes(server: FastifyInstance): Promise<void> {
   // All API routes are prefixed with /api/v1
@@ -26,6 +31,11 @@ export async function registerRoutes(server: FastifyInstance): Promise<void> {
       registerCreateFileRoutes(api);
       registerScheduleRoutes(api);
       registerMultiDeviceRoutes(api);
+      registerVoiceRoutes(api);
+      registerAnalyticsRoutes(api);
+      registerRAGRoutes(api);
+      registerPluginRoutes(api);
+      registerWorkflowRoutes(api);
     },
     { prefix: '/api/v1' },
   );

@@ -151,7 +151,10 @@ export class AlertService {
       where: eq(schema.users.id, userId),
     });
 
-    if (!user) return;
+    if (!user || !user.telegramId || user.telegramId === 0) {
+      logger.debug({ userId }, 'No valid Telegram ID for user, skipping alert');
+      return;
+    }
 
     const message = this.formatAlertMessage(type, data);
     await this.sendTelegramAlert(user.telegramId, message);

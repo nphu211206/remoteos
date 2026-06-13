@@ -133,6 +133,17 @@ export class SystemMonitor {
       const netDown = networkStats.reduce((sum, n) => sum + (n.rx_sec || 0), 0);
       const netUp = networkStats.reduce((sum, n) => sum + (n.tx_sec || 0), 0);
 
+      // Get GPU temperature
+      let gpuTemp: number | null = null;
+      try {
+        const graphics = await si.graphics();
+        if (graphics.controllers && graphics.controllers.length > 0) {
+          gpuTemp = graphics.controllers[0]?.temperatureGpu ?? null;
+        }
+      } catch {
+        // GPU temp not available on this system
+      }
+
       return {
         deviceId,
         status: 'online',
@@ -140,7 +151,7 @@ export class SystemMonitor {
         ramUsage: Math.round((1 - mem.available / mem.total) * 1000) / 10,
         diskUsage: Math.round(diskUsedPercent * 10) / 10,
         cpuTemp: cpuTemp.main ?? null,
-        gpuTemp: null, // TODO: GPU temp via platform-specific methods
+        gpuTemp,
         networkDownMbps: Math.round(netDown / (1024 * 1024) * 100) / 100,
         networkUpMbps: Math.round(netUp / (1024 * 1024) * 100) / 100,
         uptimeSeconds: Math.floor(os.uptime()),

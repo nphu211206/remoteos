@@ -89,6 +89,17 @@ export function parseScheduleText(text: string): string | null {
     return `${min} ${hour} * * *`;
   }
 
+  // "mỗi 8h sáng" or "mỗi 9h tối"
+  const everyTime = lower.match(/mỗi\s+(\d{1,2})\s*(?:h|giờ)\s*(sáng|am|chiều|pm|tối)?/);
+  if (everyTime) {
+    let hour = parseInt(everyTime[1]);
+    const period = everyTime[2];
+    if (period === 'chiều' || period === 'pm' || period === 'tối') {
+      if (hour < 12) hour += 12;
+    }
+    return `0 ${hour} * * *`;
+  }
+
   // Morning: "mỗi sáng" or "mỗi ngày sáng"
   if (/mỗi sáng|every morning/i.test(lower)) return '0 8 * * *';
 
@@ -322,7 +333,7 @@ export class SchedulerService {
   }
 
   /**
-   * Check if schedule should run at this time (simplified cron check)
+   * Check if schedule should run at this time (full cron check)
    */
   private shouldRun(cronExpr: string, now: Date): boolean {
     const parts = cronExpr.split(' ');
@@ -331,22 +342,40 @@ export class SchedulerService {
     const [min, hour, dayOfMonth, month, dayOfWeek] = parts;
 
     // Check minute
-    if (min !== '*' && !min.startsWith('*/')) {
-      if (parseInt(min) !== now.getMinutes()) return false;
-    } else if (min.startsWith('*/')) {
-      const interval = parseInt(min.slice(2));
-      if (now.getMinutes() % interval !== 0) return false;
-    }
+    if (!this.matchesCronField(min, now.getMinutes())) return false;
 
     // Check hour
-    if (hour !== '*' && !hour.startsWith('*/')) {
-      if (parseInt(hour) !== now.getHours()) return false;
-    } else if (hour.startsWith('*/')) {
-      const interval = parseInt(hour.slice(2));
-      if (now.getHours() % interval !== 0) return false;
-    }
+    if (!this.matchesCronField(hour, now.getHours())) return false;
+
+    // Check day of month
+    if (!this.matchesCronField(dayOfMonth, now.getDate())) return false;
+
+    // Check month
+    if (!this.matchesCronField(month, now.getMonth() + 1)) return false;
+
+    // Check day of week (0=Sunday in JS, 0=Sunday in cron)
+    if (!this.matchesCronField(dayOfWeek, now.getDay())) return false;
 
     return true;
+  }
+
+  /**
+   * Match a single cron field against a value
+   */
+  private matchesCronField(field: string, value: number): boolean {
+    if (field === '*') return true;
+    if (field.startsWith('*/')) {
+      const interval = parseInt(field.slice(2));
+      return value % interval === 0;
+    }
+    if (field.includes(',')) {
+      return field.split(',').some(v => this.matchesCronField(v.trim(), value));
+    }
+    if (field.includes('-')) {
+      const [start, end] = field.split('-').map(Number);
+      return value >= start && value <= end;
+    }
+    return parseInt(field) === value;
   }
 
   /**

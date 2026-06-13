@@ -11,40 +11,13 @@
 
 import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
+import { formatBytes, formatDuration, formatProgressBar } from '@remoteos/shared/utils';
+import { mainMenuKeyboard } from '../utils/keyboards.js';
 import { ServerClient } from '../client/server-client.js';
 import { config } from '../config/index.js';
 import { logger } from '../config/logger.js';
 
 const serverClient = new ServerClient(config.server.url);
-
-// ─── Inline Keyboards ─────────────────────────────────────────────
-
-function mainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: '🖥️ Status', callback_data: 'cmd:status' },
-        { text: '📸 Screenshot', callback_data: 'cmd:screenshot' },
-      ],
-      [
-        { text: '🔧 Processes', callback_data: 'cmd:process_list' },
-        { text: '💻 System Info', callback_data: 'cmd:system_info' },
-      ],
-      [
-        { text: '📁 Files', callback_data: 'cmd:file_list' },
-        { text: '📋 Clipboard', callback_data: 'cmd:get_clipboard' },
-      ],
-      [
-        { text: '🔒 Lock', callback_data: 'cmd:lock_screen' },
-        { text: '🔔 Notify', callback_data: 'action:notify' },
-      ],
-      [
-        { text: '📱 Devices', callback_data: 'action:devices' },
-        { text: '❓ Help', callback_data: 'action:help' },
-      ],
-    ],
-  };
-}
 
 function deviceSelectorKeyboard(devices: Array<{ id: string; name: string; status: string }>) {
   return {
@@ -53,33 +26,6 @@ function deviceSelectorKeyboard(devices: Array<{ id: string; name: string; statu
       callback_data: `select:${d.id}`,
     }]),
   };
-}
-
-// ─── Progress Bar Helper ──────────────────────────────────────────
-
-function makeProgressBar(percent: number, width = 15): string {
-  const filled = Math.round((percent / 100) * width);
-  const empty = width - filled;
-  return '█'.repeat(filled) + '░'.repeat(empty);
-}
-
-function formatBytes(bytes: number, decimals = 1): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(decimals)} ${sizes[i]}`;
-}
-
-function formatDuration(seconds: number): string {
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const parts: string[] = [];
-  if (d > 0) parts.push(`${d}d`);
-  if (h > 0) parts.push(`${h}h`);
-  parts.push(`${m}m`);
-  return parts.join(' ');
 }
 
 // ─── Command Registration ─────────────────────────────────────────
@@ -198,9 +144,9 @@ export function registerCommands(bot: Bot<BotContext>): void {
         '║   🖥️  SYSTEM STATUS           ║',
         '╚══════════════════════════════╝',
         '',
-        `🔲 CPU   ${makeProgressBar(cpu.usage)} ${cpu.usage.toFixed(1)}%`,
-        `💾 RAM   ${makeProgressBar(ram.usagePercent)} ${ram.usedGb}/${ram.totalGb} GB`,
-        `💿 Disk  ${makeProgressBar(disk.usagePercent)} ${disk.usedGb}/${disk.totalGb} GB`,
+        `🔲 CPU   ${formatProgressBar(cpu.usage)} ${cpu.usage.toFixed(1)}%`,
+        `💾 RAM   ${formatProgressBar(ram.usagePercent)} ${ram.usedGb}/${ram.totalGb} GB`,
+        `💿 Disk  ${formatProgressBar(disk.usagePercent)} ${disk.usedGb}/${disk.totalGb} GB`,
         '',
         `⏱️ Uptime: ${uptime.formatted}`,
         `📊 Processes: ${processes.total}`,
@@ -290,7 +236,7 @@ export function registerCommands(bot: Bot<BotContext>): void {
       const top = output.processes.slice(0, 12);
       for (let i = 0; i < top.length; i++) {
         const p = top[i]!;
-        const cpuBar = makeProgressBar(Math.min(p.cpu, 100), 8);
+        const cpuBar = formatProgressBar(Math.min(p.cpu, 100), 8);
         const rank = String(i + 1).padStart(2, ' ');
         lines.push(
           `${rank}. *${p.name}* (PID: ${p.pid})`,
@@ -536,24 +482,48 @@ export function registerCommands(bot: Bot<BotContext>): void {
 
     if (args.startsWith('model ')) {
       const model = args.replace('model ', '').trim();
-      await ctx.reply(
-        `✅ *Hoàn tất!*\n\n` +
-        `🧠 Model: ${model}\n\n` +
-        'Bây giờ bạn có thể gõ bất cứ lệnh nào!\n' +
-        'AI sẽ hiểu và máy tính sẽ làm.',
-      );
+      try {
+        await serverClient.setUserAIConfig({ model });
+        await ctx.reply(
+          `✅ *Đã chuyển model!*\n\n` +
+          `🧠 Model: \`${model}\`\n\n` +
+          'Bây giờ bạn có thể gõ bất cứ lệnh nào!',
+          { parse_mode: 'Markdown' },
+        );
+      } catch (err: any) {
+        await ctx.reply(`❌ Lỗi lưu model: ${err.message}`);
+      }
       return;
     }
 
     if (args === 'test') {
       await ctx.reply('🧪 Đang test kết nối AI...');
-      // TODO: Implement actual test
-      await ctx.reply('✅ Kết nối AI thành công!');
+      try {
+        const result = await serverClient.interpret('xin chào');
+        if (result.success && result.intent) {
+          await ctx.reply(
+            `✅ *AI hoạt động bình thường!*\n\n` +
+            `📊 Nguồn: \`${result.intent.source}\`\n` +
+            `🎯 Confidence: \`${result.intent.confidence}\`\n` +
+            `💬 Phản hồi: ${result.intent.type}`,
+            { parse_mode: 'Markdown' },
+          );
+        } else {
+          await ctx.reply('⚠️ AI phản hồi nhưng không có intent.');
+        }
+      } catch (err: any) {
+        await ctx.reply(`❌ Lỗi kết nối AI: ${err.message}`);
+      }
       return;
     }
 
     if (args === 'reset') {
-      await ctx.reply('🔄 Đã xóa cấu hình AI. Sử dụng Gemini default.');
+      try {
+        await serverClient.deleteUserAIConfig();
+        await ctx.reply('🔄 Đã xóa cấu hình AI. Sử dụng Gemini default.');
+      } catch (err: any) {
+        await ctx.reply(`❌ Lỗi xóa config: ${err.message}`);
+      }
       return;
     }
 
@@ -591,8 +561,8 @@ export function registerCommands(bot: Bot<BotContext>): void {
         lines.push(`${statusEmoji} *${device.name}* (${device.os})`);
 
         if (device.status === 'online' && device.cpuUsage !== null) {
-          const cpuBar = makeProgressBar(device.cpuUsage, 10);
-          const ramBar = makeProgressBar(device.ramUsage ?? 0, 10);
+          const cpuBar = formatProgressBar(device.cpuUsage, 10);
+          const ramBar = formatProgressBar(device.ramUsage ?? 0, 10);
           lines.push(`   CPU ${cpuBar} ${device.cpuUsage.toFixed(1)}%`);
           lines.push(`   RAM ${ramBar} ${(device.ramUsage ?? 0).toFixed(1)}%`);
         }

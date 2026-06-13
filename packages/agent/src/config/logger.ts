@@ -3,10 +3,9 @@
  */
 
 import pino from 'pino';
-import { config } from './index.js';
 
 export const logger = pino({
-  level: config.logging.level,
+  level: process.env.AGENT_LOG_LEVEL ?? 'info',
   transport: {
     target: 'pino-pretty',
     options: {

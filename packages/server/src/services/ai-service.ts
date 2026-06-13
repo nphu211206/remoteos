@@ -40,6 +40,7 @@ import {
 } from '@remoteos/shared/utils';
 import { ProviderFactory, type AIProvider } from './ai-providers/index.js';
 import { UserSettingsService } from './user-settings-service.js';
+import { detectEmotion, injectEmotionalContext, type EmotionAnalysis } from './emotion-detector.js';
 import type { AIProviderConfig } from '@remoteos/shared';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -87,32 +88,70 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_CACHE_ENTRIES = 500;
 
-// Model routing — use stronger model for complex tasks
-const MODEL_LITE = 'gemini-3.1-flash-lite';       // 500 RPD, fast, for simple commands
-const MODEL_STRONG = 'gemini-2.5-flash-lite';     // 20 RPD, better quality, for code/reports
+// Model fallback chain — try best models first, fall back to lite
+const MODEL_CHAIN = [
+  'gemini-3.5-flash',        // OK — available
+  'gemini-2.5-flash',        // OK — available
+  'gemini-3.1-flash-lite',   // OK — available
+];
 
-/** Detect if user request needs a stronger model */
-function needsStrongModel(text: string): boolean {
-  const complexPatterns = [
-    /tạo|viết|code|create|write|build|make|generate/i,
-    /website|web|app|project|dự án|ứng dụng/i,
-    /html|css|javascript|python|script|program/i,
-    /báo cáo|report|phân tích|research|nghiên cứu/i,
-    /file.*\.(py|js|html|css|json|ts|java|cpp)/i,
-    /dòng|lines|trang|pages|hoàn chỉnh|complete|full/i,
-    /multi|nhiều file| nhiều thư mục/i,
-  ];
-  return complexPatterns.some(p => p.test(text));
+// Rate limiting — max 12 RPM to stay under 15 RPM limit
+const RATE_LIMIT_RPM = 12;
+const rateLimitTimestamps: number[] = [];
+
+function checkRateLimit(): boolean {
+  const now = Date.now();
+  const oneMinuteAgo = now - 60000;
+
+  // Remove timestamps older than 1 minute
+  while (rateLimitTimestamps.length > 0 && rateLimitTimestamps[0]! < oneMinuteAgo) {
+    rateLimitTimestamps.shift();
+  }
+
+  return rateLimitTimestamps.length < RATE_LIMIT_RPM;
+}
+
+function recordRequest(): void {
+  rateLimitTimestamps.push(Date.now());
 }
 
 /** Select the best model for the task */
-function selectModel(text: string): string {
-  // Simple commands (status, screenshot, etc.) → lite model
-  if (!needsStrongModel(text)) {
-    return config.gemini.model || MODEL_LITE;
+function selectModel(_text: string): string {
+  return config.gemini.model || MODEL_CHAIN[0]!;
+}
+
+/** Call Gemini API with fallback chain and rate limiting */
+async function callGeminiWithFallback(url: string, body: unknown, timeout: number): Promise<GeminiResponse> {
+  let lastError: Error | null = null;
+
+  // Check rate limit before making request
+  if (!checkRateLimit()) {
+    // Wait until we can make a request
+    const waitTime = rateLimitTimestamps[0]! + 60000 - Date.now() + 100;
+    if (waitTime > 0 && waitTime < 60000) {
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
   }
-  // Complex tasks → stronger model (if available)
-  return MODEL_STRONG;
+
+  for (const model of MODEL_CHAIN) {
+    const modelUrl = url.replace(/models\/[^:]+/, `models/${model}`);
+    try {
+      recordRequest();
+      const response = await axios.post<GeminiResponse>(modelUrl, body, { timeout });
+      return response.data;
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number }; message?: string };
+      if (axiosErr.response?.status === 429) {
+        // Quota exceeded, try next model
+        logger.warn({ model, status: 429 }, 'Model quota exceeded, trying next');
+        lastError = new Error(`Model ${model} quota exceeded`);
+        continue;
+      }
+      throw err; // Other errors, throw immediately
+    }
+  }
+
+  throw lastError || new Error('All models exhausted');
 }
 
 // ─── Intent Patterns (Rule-based) ─────────────────────────────────
@@ -321,215 +360,429 @@ const INTENT_PATTERNS: IntentPattern[] = [
     },
     confidence: 0.80,
   },
+
+  // ─── File Delete ─────────────────────────────────────────────
+  {
+    type: 'file_delete',
+    patterns: [
+      /(xóa|delete|remove|xóa file|xóa thư mục)\s+(.+)/i,
+    ],
+    extractParams: (text, match) => {
+      const path = match[2]?.trim() || '';
+      const recursive = /thư mục|folder|directory|-r/i.test(text);
+      return { path, recursive };
+    },
+    confidence: 0.90,
+  },
+
+  // ─── File Search ─────────────────────────────────────────────
+  {
+    type: 'file_search',
+    patterns: [
+      /(tìm|search|find|kiếm)\s+(?:file|tập tin)\s+(.+)/i,
+      /(tìm|search|find|kiếm)\s+(.+\.\w+)/i,
+    ],
+    extractParams: (text, match) => {
+      const pattern = match[2]?.trim() || '';
+      return { pattern: `**/*${pattern}*` };
+    },
+    confidence: 0.85,
+  },
+
+  // ─── File Info ───────────────────────────────────────────────
+  {
+    type: 'file_info',
+    patterns: [
+      /(thông tin|info|details|chi tiết)\s+(?:file|tập tin)\s+(.+)/i,
+      /(file|tập tin)\s+(.+)\s+(?:thông tin|info)/i,
+    ],
+    extractParams: (text, match) => {
+      const path = match[2]?.trim() || '';
+      return { path };
+    },
+    confidence: 0.85,
+  },
+
+  // ─── File Read ───────────────────────────────────────────────
+  {
+    type: 'file_read',
+    patterns: [
+      /(đọc|read|xem|cat)\s+(?:file|tập tin|nội dung)\s+(.+)/i,
+      /(đọc|read|xem|cat)\s+(.+\.\w+)/i,
+    ],
+    extractParams: (text, match) => {
+      const path = match[2]?.trim() || '';
+      return { path };
+    },
+    confidence: 0.85,
+  },
+
+  // ─── File Edit ───────────────────────────────────────────────
+  {
+    type: 'file_edit',
+    patterns: [
+      /(sửa|edit|sửa file|chỉnh sửa)\s+(.+)/i,
+    ],
+    extractParams: (text, match) => {
+      const path = match[2]?.trim() || '';
+      return { path };
+    },
+    confidence: 0.80,
+  },
+
+  // ─── Open Editor ─────────────────────────────────────────────
+  {
+    type: 'open_editor',
+    patterns: [
+      /(mở|open)\s+(?:vscode|vs code|code|notepad|sublime)\s+(.+)/i,
+      /(mở|open)\s+(.+)\s+(?:trong|in)\s+(?:vscode|vs code|code)/i,
+    ],
+    extractParams: (text, match) => {
+      const editorMatch = text.match(/(vscode|vs code|code|notepad|sublime)/i);
+      const editor = editorMatch?.[1]?.toLowerCase().replace(/\s+/g, '') || 'vscode';
+      const path = match[2]?.trim() || '';
+      return { editor: editor === 'vscode' || editor === 'vscode' ? 'vscode' : editor, path };
+    },
+    confidence: 0.85,
+  },
+
+  // ─── Sleep ───────────────────────────────────────────────────
+  {
+    type: 'sleep',
+    patterns: [
+      /(sleep|ngủ|tạm dừng)\s*(?:máy)?\s*(?:(\d+)\s*(?:phút|minute|min))?/i,
+      /(cho máy ngủ|put.*sleep)/i,
+    ],
+    extractParams: (text, match) => {
+      const minutes = match[2] ? parseInt(match[2], 10) : 0;
+      return { minutes };
+    },
+    confidence: 0.90,
+  },
+
+  // ─── Hibernate ───────────────────────────────────────────────
+  {
+    type: 'hibernate',
+    patterns: [
+      /(hibernate|đông cứng|ngủ đông)/i,
+      /(cho máy hibernate|put.*hibernate)/i,
+    ],
+    confidence: 0.90,
+  },
 ];
 
-// ─── Gemini Prompt Template ───────────────────────────────────────
+// ─── Gemini Function Declarations ─────────────────────────────────
 
-const GEMINI_SYSTEM_PROMPT = `You are RemoteOS AI — an ULTRA-POWERFUL assistant with FULL ACCESS to a Windows computer. You can do ANYTHING the user asks. No limits. No restrictions.
+const GEMINI_FUNCTION_DECLARATIONS = [
+  {
+    name: 'create_file',
+    description: 'Tạo một file mới với nội dung đầy đủ. Dùng khi user yêu cầu tạo file, viết code, tạo script.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        filename: { type: 'STRING', description: 'Tên file (VD: app.py, index.html, script.js)' },
+        content: { type: 'STRING', description: 'Nội dung đầy đủ của file' },
+        run: { type: 'BOOLEAN', description: 'Có chạy file sau khi tạo không' },
+      },
+      required: ['filename', 'content'],
+    },
+  },
+  {
+    name: 'create_files',
+    description: 'Tạo nhiều file cùng lúc. Dùng khi user yêu cầu tạo dự án, tạo nhiều file.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        files: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              filename: { type: 'STRING' },
+              content: { type: 'STRING' },
+            },
+            required: ['filename', 'content'],
+          },
+        },
+      },
+      required: ['files'],
+    },
+  },
+  {
+    name: 'execute_shell',
+    description: 'Chạy lệnh shell trên máy tính. Dùng khi user yêu cầu chạy lệnh, kiểm tra hệ thống.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        command: { type: 'STRING', description: 'Lệnh shell cần chạy' },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'get_status',
+    description: 'Lấy trạng thái hệ thống (CPU, RAM, Disk, Network). Dùng khi user hỏi về máy tính.',
+    parameters: { type: 'OBJECT', properties: {} },
+  },
+  {
+    name: 'take_screenshot',
+    description: 'Chụp ảnh màn hình. Dùng khi user yêu cầu chụp màn hình.',
+    parameters: { type: 'OBJECT', properties: {} },
+  },
+  {
+    name: 'list_processes',
+    description: 'Liệt kê tiến trình đang chạy. Dùng khi user hỏi về process.',
+    parameters: { type: 'OBJECT', properties: {} },
+  },
+  {
+    name: 'read_file',
+    description: 'Đọc nội dung file. Dùng khi user yêu cầu đọc file.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING', description: 'Đường dẫn file' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'process_file',
+    description: 'Đọc file Word/PDF/Excel. Dùng khi user yêu cầu đọc file .docx, .pdf, .xlsx.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING', description: 'Đường dẫn file' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'search_files',
+    description: 'Tìm kiếm file trên máy tính.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        pattern: { type: 'STRING', description: 'Pattern tìm kiếm (VD: *.py, *.docx)' },
+        path: { type: 'STRING', description: 'Thư mục tìm kiếm' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'launch_app',
+    description: 'Mở ứng dụng. Dùng khi user yêu cầu mở app.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        name: { type: 'STRING', description: 'Tên ứng dụng (VD: chrome, vscode, notepad)' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'kill_process',
+    description: 'Tắt process. Dùng khi user yêu cầu tắt app/process.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        name: { type: 'STRING', description: 'Tên process cần tắt' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'set_volume',
+    description: 'Điều khiển âm lượng.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        level: { type: 'NUMBER', description: 'Mức âm lượng 0-100' },
+        action: { type: 'STRING', description: 'Hành động: up, down, mute' },
+      },
+    },
+  },
+  {
+    name: 'lock_screen',
+    description: 'Khóa màn hình máy tính.',
+    parameters: { type: 'OBJECT', properties: {} },
+  },
+  {
+    name: 'send_notification',
+    description: 'Gửi thông báo desktop.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING' },
+        body: { type: 'STRING' },
+      },
+      required: ['body'],
+    },
+  },
+  {
+    name: 'web_search',
+    description: 'Tìm kiếm trên web.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING', description: 'Từ khóa tìm kiếm' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'open_in_vscode',
+    description: 'Mở file/folder trong VS Code.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING', description: 'Đường dẫn file/folder' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'open_project',
+    description: 'Mở dự án trong IDE. Tự động detect IDE và mở đúng thư mục dự án.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING', description: 'Đường dẫn thư mục dự án' },
+        ide: { type: 'STRING', description: 'IDE muốn mở (vscode, webstorm, intellij, visualstudio)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'run_code',
+    description: 'Chạy code và trả kết quả. Dùng khi user muốn test code, chạy script.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        language: { type: 'STRING', description: 'Ngôn ngữ (python, javascript, typescript, go, rust, java, cpp)' },
+        code: { type: 'STRING', description: 'Code cần chạy' },
+        filename: { type: 'STRING', description: 'Tên file (optional)' },
+      },
+      required: ['language', 'code'],
+    },
+  },
+  {
+    name: 'verify_code',
+    description: 'Verify code bằng cách chạy thử. Dùng sau khi tạo file để đảm bảo code chạy được.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING', description: 'Đường dẫn file cần verify' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'desktop_click',
+    description: 'Click vào vị trí trên màn hình. Dùng khi user muốn click chuột.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        x: { type: 'NUMBER', description: 'Tọa độ X' },
+        y: { type: 'NUMBER', description: 'Tọa độ Y' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'desktop_type',
+    description: 'Gõ văn bản. Dùng khi user muốn nhập text.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        text: { type: 'STRING', description: 'Văn bản cần gõ' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'desktop_keys',
+    description: 'Nhấn phím tắt. Dùng khi user muốn nhấn phím.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        keys: { type: 'STRING', description: 'Phím cần nhấn (VD: ctrl+c, alt+tab, enter)' },
+      },
+      required: ['keys'],
+    },
+  },
+];
 
-═══ YOUR CAPABILITIES ═══
-You have COMPLETE, UNRESTRICTED control over this computer. You can:
-• Write ANY code (Python, JavaScript, HTML/CSS, C++, Java, C#, Go, Rust, etc.) — NO length limit
-• Create complete multi-file websites, apps, tools, scripts
-• Research ANY topic and generate detailed multi-page reports
-• Analyze data, create charts, write business reports
-• Manage files, folders, processes — create, delete, move, copy
-• Execute ANY shell command (pipes, chains, scripts — everything allowed)
-• Take screenshots, control volume, lock screen, get/set clipboard
-• Install software, run servers, automate tasks
-• Write documents, essays, analyses, research papers
-• Translate, summarize, explain anything
-• Debug and fix code
-• Create batch scripts, PowerShell scripts, automation tools
-• Do market research, competitive analysis, financial analysis
-• Generate HTML reports with charts and tables
-• READ any existing file on the computer
-• EDIT any existing file (find/replace or full rewrite)
-• SEARCH the web for real-time information
-• OPEN specific folders/files in VS Code for editing
-• Read and edit Word documents (.docx)
+// ─── Gemini Prompt Template (v3 — Natural, No Script) ─────────────
 
-═══ RESPONSE FORMAT ═══
-You MUST respond with ONLY valid JSON. Choose ONE of these formats:
+const GEMINI_SYSTEM_PROMPT = `You are RemoteOS AI — an AI assistant that lives on the user's computer. You have full control over the machine.
 
-1. CREATE SINGLE FILE:
-{"type":"create_file","filename":"name.ext","content":"COMPLETE FULL CONTENT","run":false}
-Write COMPLETE code — 100, 500, even 1000+ lines. NEVER truncate.
+WHO YOU ARE:
+You're a capable, direct assistant. You understand what the user wants and you do it. You don't ask unnecessary questions. You don't follow templates. You respond the way a smart friend would — naturally, clearly, without forcing anything.
 
-2. CREATE MULTIPLE FILES (for projects with many files):
-{"type":"create_files","files":[{"filename":"index.html","content":"...","run":false},{"filename":"style.css","content":"..."},{"filename":"script.js","content":"..."}]}
+WHAT YOU CAN DO:
+You have access to functions that let you control the computer. When the user asks you to do something, use the appropriate function. Don't just describe what you'd do — actually do it.
 
-3. RUN SHELL COMMAND:
-{"type":"shell","command":"the exact command"}
-Pipes (|), chains (&&, ;), redirects (>) are ALL allowed.
+HOW YOU WORK:
+- If the user's request is clear → do it immediately
+- If it's ambiguous → make the best reasonable choice and proceed
+- If you need context → check conversation history
+- If something fails → try a different approach
+- After completing → briefly confirm what was done
 
-4. SYSTEM STATUS:
-{"type":"status"}
+EMOTIONAL INTELLIGENCE:
+- Detect the user's emotional state from their message
+- If they seem frustrated → be extra helpful, apologize for issues, offer solutions
+- If they seem excited → match their energy, celebrate successes
+- If they seem confused → explain things more clearly, break down steps
+- If they seem stressed → be calm, reassuring, and efficient
+- If they seem happy → share in their enthusiasm
+- Adapt your tone to match the situation — serious for problems, casual for chat
+- Show empathy when things go wrong: "I understand that's frustrating"
+- Celebrate wins: "That worked perfectly!" or "Great choice!"
 
-5. SYSTEM INFO:
-{"type":"system_info"}
+CODE YOU CREATE:
+- Must be complete and runnable — no placeholders, no "..."
+- Include all imports, error handling, proper structure
+- Python files start with # -*- coding: utf-8 -*-
+- Use the best language for the task (not just Python)
+- After creating code, verify it works by running it
 
-6. SCREENSHOT:
-{"type":"screenshot"}
+AVAILABLE FUNCTIONS:
+create_file, create_files, execute_shell, get_status, take_screenshot, list_processes, read_file, process_file, search_files, launch_app, kill_process, set_volume, lock_screen, send_notification, web_search, open_in_vscode, open_project, run_code, verify_code, desktop_click, desktop_type, desktop_keys
 
-7. PROCESS LIST:
-{"type":"process_list"}
+CONTEXT AWARENESS:
+- "nó", "file đó", "thư mục đó" → use path from conversation history
+- "tương tự" → do the same as before
+- "tiếp tục" → do the next step
+- When user says "bất kì" → pick the best option, don't ask
+- Remember user preferences from previous interactions
+- Adapt to user's skill level — technical for experts, simple for beginners
 
-8. KILL PROCESS:
-{"type":"process_kill","params":{"name":"process_name"}}
+LEARNING FROM USER:
+- Track what the user frequently asks for
+- Remember their preferred coding languages
+- Learn their common file paths and project locations
+- Adapt responses based on their expertise level
+- Suggest improvements based on their workflow patterns
 
-9. LAUNCH APP:
-{"type":"app_launch","params":{"name":"app_name"}}
+IMPORTANT:
+- Always use function calls when you need to take action
+- Don't just respond with text when you can actually do something
+- Be natural — don't force emojis, humor, or a specific tone
+- Just be helpful and direct
+- Show emotional awareness without being fake`;
 
-10. CLOSE APP:
-{"type":"app_close","params":{"name":"app_name"}}
+// ─── Legacy action-based prompt (fallback) ─────────────────────────
 
-11. LIST APPS:
-{"type":"app_list"}
+const GEMINI_LEGACY_PROMPT = `Bạn là RemoteOS AI. Khi cần hành động, dùng thẻ <action>:
 
-12. FILE LIST:
-{"type":"file_list","params":{"path":"C:\\\\Users\\\\Admin"}}
+<action>
+{"type":"create_file","filename":"ten.ext","content":"nội dung"}
+</action>
 
-13. DOWNLOAD FILE:
-{"type":"file_download","params":{"url":"https://..."}}
+Các loại action: create_file, create_files, shell, status, screenshot, process_list, file_read, process_file, file_search, launch_app, kill_process, set_volume, lock_screen, notify, web_search, open_in_vscode.
 
-14. NOTIFICATION:
-{"type":"notify","params":{"title":"Title","body":"Message"}}
-
-15. SET VOLUME:
-{"type":"set_volume","params":{"level":50}}
-
-16. GET CLIPBOARD:
-{"type":"get_clipboard"}
-
-17. SET CLIPBOARD:
-{"type":"set_clipboard","params":{"content":"text to copy"}}
-
-18. LOCK SCREEN:
-{"type":"lock_screen"}
-
-19. FREE RESPONSE (questions, explanations, research, reports):
-{"type":"free_response","response":"Your DETAILED answer. Can be 1000+ words for reports.","confidence":0.9}
-
-20. READ FILE (read any file content):
-{"type":"read_file","params":{"path":"C:\\Users\\Admin\\Desktop\\file.py"}}
-
-21. EDIT FILE (find and replace in existing file):
-{"type":"edit_file","params":{"path":"C:\\Users\\Admin\\Desktop\\file.py","find":"old text","replace":"new text"}}
-Or replace entire content:
-{"type":"edit_file","params":{"path":"C:\\Users\\Admin\\Desktop\\file.py","content":"entire new content"}}
-
-22. WEB SEARCH (search the internet):
-{"type":"web_search","params":{"query":"search query here"}}
-
-23. OPEN IN VS CODE (open folder or file in VS Code):
-{"type":"open_in_vscode","params":{"path":"C:\\Users\\Admin\\Projects\\my-app"}}
-
-24. CLARIFICATION (ask user for more info when request is ambiguous):
-{"type":"clarification","response":"Bạn muốn tạo file gì? Python, HTML, hay JavaScript?","confidence":0.9,"suggestions":["Python script","HTML website","JavaScript app"]}
-
-25. CREATE SCHEDULE (automate recurring tasks):
-{"type":"create_schedule","params":{"name":"Screenshot hàng ngày","schedule":"mỗi 8h sáng","commandType":"screenshot","deviceId":"<device_id>"}}
-
-26. LIST SCHEDULES:
-{"type":"list_schedules"}
-
-27. DELETE SCHEDULE:
-{"type":"delete_schedule","params":{"scheduleId":"<id>"}}
-
-28. CREATE PROJECT (scaffold complete project with all files):
-{"type":"create_project","params":{"framework":"react","name":"my-app","features":["auth","api","database"]}}
-Supported frameworks: react, nextjs, vue, express, flask, django, angular, svelte, fastapi
-
-29. ALL DEVICES STATUS (check all devices at once):
-{"type":"all_devices_status"}
-
-30. BATCH COMMAND (execute on multiple devices):
-{"type":"batch_command","params":{"commandType":"screenshot","allOnline":true}}
-
-31. CREATE DEVICE GROUP:
-{"type":"create_device_group","params":{"name":"work","description":"Máy văn phòng","deviceIds":["id1","id2"]}}
-
-32. EXECUTE ON GROUP:
-{"type":"execute_group","params":{"groupName":"work","commandType":"status"}}
-
-═══ WHEN TO USE CLARIFICATION ═══
-Use clarification when:
-- User says "tạo file" but doesn't specify type/name
-- User says "sửa file" but doesn't specify which file or what to change
-- User says "tải file" but no URL provided
-- User says "mở app" but doesn't say which app
-- Request is too vague to execute safely
-NEVER use clarification for clear, specific requests.
-
-═══ CRITICAL RULES — MUST FOLLOW ═══
-⚠️ CODE LENGTH: When user says "500 dòng" → write EXACTLY 500+ lines. When user says "hoàn chỉnh" → write 300+ lines MINIMUM. NEVER truncate with "...", "# ...", "// ...", "rest of code", "TODO", or any placeholder.
-⚠️ CODE QUALITY: Every code file MUST have: proper imports, error handling, docstrings/comments, type hints (Python), proper indentation, meaningful variable names.
-⚠️ MULTI-FILE: For projects, use create_files with ALL files. Each file must be COMPLETE and WORKING.
-⚠️ WEBSITES: HTML 200+ lines with FULL content. CSS 100+ lines with COMPLETE styling. JS 100+ lines with ALL functionality.
-⚠️ REPORTS: free_response reports must be 2000+ words with detailed analysis, data, examples, recommendations.
-⚠️ PYTHON: Include ALL imports, ALL classes, ALL methods, ALL error handling, ALL docstrings, ALL type hints. Write the FULL program, not a skeleton.
-⚠️ ANY PATH: You can write to ANY path, not just Desktop.
-⚠️ SHELL: Pipes (|), chains (&&, ;), redirects (>) — ALL allowed.
-⚠️ VIETNAMESE & ENGLISH: Support both languages.
-⚠️ NEVER SAY "I can't" or "This is too long". You CAN write 1000+ lines. You CAN create complete projects. You CAN do anything.
-
-═══ CONTEXT AWARENESS ═══
-When user refers to previous actions:
-- "sửa file đó" → refers to the last file mentioned
-- "thêm cái này vào" → add to the last file/project
-- "chạy nó" → run the last created file
-- "mở thư mục đó" → open the last mentioned folder
-Use conversation history to understand references.
-
-═══ COMPOUND REQUESTS ═══
-When user asks for multiple things at once:
-- "tạo file Python rồi chạy nó" → create_file with run:true
-- "tạo website 5 file rồi mở VS Code" → create_files, then open_in_vscode
-- "kiểm tra CPU và chụp màn hình" → return compound response
-For compound requests, execute the FIRST action and mention what comes next.
-
-═══ EDGE CASES ═══
-- User asks to "code 500 dòng" → write EXACTLY 500+ lines, no shortcuts
-- User asks to "tạo dự án React" → create full project with package.json, src/, public/, configs
-- User asks to "research thị trường X" → write detailed 2000+ word report with data, analysis, predictions
-- User asks to "sửa lỗi code" → read the file, find the bug, fix it
-- User asks to "tối ưu code" → read file, optimize, write back
-- User asks to "dịch file" → read source, translate, create new file
-- User asks to "tóm tắt file" → read file, create summary
-- User asks to "so sánh X và Y" → research both, create comparison report
-- User asks to "tạo API" → create full REST API with routes, models, middleware
-- User asks to "tạo bot" → create complete bot with handlers, commands
-- User asks to "phân tích dữ liệu" → read data file, create analysis with charts
-- User asks to "tạo báo cáo Word" → create Python script that generates .docx
-- User asks to "backup dữ liệu" → create backup script with scheduling
-- User asks to "monitor server" → create monitoring script with alerts
-- User asks to "automate task" → create automation script with error handling
-- User asks to "tạo lịch chụp màn hình 8h" → create_schedule type
-- User asks to "mỗi ngày backup" → create_schedule with cron
-- User asks to "hủy lịch" → delete_schedule type
-- User asks to "xem lịch" → list_schedules type
-- User asks to "tạo dự án React" → create_project type with framework:react
-- User asks to "tạo dự án Next.js" → create_project type with framework:nextjs
-- User asks to "tạo dự án Express" → create_project type with framework:express
-- User asks to "tạo dự án Flask" → create_project type with framework:flask
-- User asks to "tạo dự án Vue" → create_project type with framework:vue
-- User asks to "tạo dự án Django" → create_project type with framework:django
-- User asks to "kiểm tra tất cả máy" → all_devices_status type
-- User asks to "chụp màn hình tất cả máy" → batch_command type with commandType:screenshot
-- User asks to "tạo nhóm work" → create_device_group type
-- User asks to "chạy lệnh trên nhóm work" → execute_group type
-
-═══ EXAMPLES ═══
-User: "tạo calculator.py" → {"type":"create_file","filename":"calculator.py","content":"import sys\\n\\ndef add(a, b):\\n    return a + b\\n\\ndef subtract(a, b):\\n    return a - b\\n\\ndef multiply(a, b):\\n    return a * b\\n\\ndef divide(a, b):\\n    if b == 0:\\n        return 'Error: Division by zero'\\n    return a / b\\n\\ndef main():\\n    print('=== Calculator ===')\\n    print('1. Add\\n2. Subtract\\n3. Multiply\\n4. Divide')\\n    choice = input('Choose: ')\\n    a = float(input('First: '))\\n    b = float(input('Second: '))\\n    ops = {'1': add, '2': subtract, '3': multiply, '4': divide}\\n    if choice in ops:\\n        print(f'Result: {ops[choice](a, b)}')\\n    else:\\n        print('Invalid choice')\\n\\nif __name__ == '__main__':\\n    main()","run":true}
-
-User: "tạo website bán hàng hoàn chỉnh" → {"type":"create_files","files":[{"filename":"shop/index.html","content":"<!DOCTYPE html>\\n<html lang='vi'>\\n<head>\\n<meta charset='UTF-8'>\\n<title>Shop Online</title>\\n<link rel='stylesheet' href='style.css'>\\n</head>\\n<body>\\n<header>\\n<h1>Shop Online</h1>\\n<nav>\\n<a href='#'>Trang chủ</a>\\n<a href='#products'>Sản phẩm</a>\\n<a href='#contact'>Liên hệ</a>\\n</nav>\\n</header>\\n<main>\\n<section id='hero'>\\n<h2>Chào mừng đến với Shop</h2>\\n<p>Khám phá sản phẩm tốt nhất</p>\\n</section>\\n<section id='products'>\\n<div class='product-card'>\\n<img src='https://via.placeholder.com/200' alt='Product'>\\n<h3>Sản phẩm 1</h3>\\n<p class='price'>299.000đ</p>\\n<button>Mua ngay</button>\\n</div>\\n</section>\\n</main>\\n<script src='script.js'></script>\\n</body>\\n</html>","run":false},{"filename":"shop/style.css","content":"* { margin: 0; padding: 0; box-sizing: border-box; }\\nbody { font-family: 'Segoe UI', sans-serif; }\\nheader { background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 20px; text-align: center; }\\nnav a { color: white; margin: 0 15px; text-decoration: none; }\\n.product-card { border: 1px solid #ddd; padding: 15px; margin: 10px; display: inline-block; width: 220px; }\\n.price { color: #e74c3c; font-weight: bold; }","run":false},{"filename":"shop/script.js","content":"document.querySelectorAll('button').forEach(btn => {\\n  btn.addEventListener('click', () => {\\n    alert('Đã thêm vào giỏ hàng!');\\n  });\\n});","run":false}]}
-
-User: "phân tích thị trường AI 2024" → {"type":"free_response","response":"# Phân tích thị trường AI 2024\\n\\n## 1. Tổng quan thị trường\\nThị trường AI toàn cầu đạt 184 tỷ USD năm 2024, tăng 37% so với năm trước...\\n\\n## 2. Các xu hướng chính\\n- Generative AI: ChatGPT, Gemini, Claude dẫn đầu\\n- AI Agents: xu hướng mới với AutoGPT, CrewAI\\n- AI trong y tế, giáo dục, tài chính\\n\\n## 3. Cơ hội và thách thức\\n...","confidence":0.95}
-
-User: "mở vscode" → {"type":"app_launch","params":{"name":"code"}}
-User: "máy tính thế nào" → {"type":"status"}
-User: "chụp màn hình" → {"type":"screenshot"}`;
+Trả lời tự nhiên, có emoji, không robot.`;
 
 // ─── AI Service Class ─────────────────────────────────────────────
 
@@ -540,14 +793,101 @@ export class AIService {
   private userSettingsService = new UserSettingsService();
   private dbInitialized = false;
 
+  // User Learning System
+  private userPatterns = new Map<string, {
+    commonCommands: Map<string, number>;
+    preferredLanguages: Map<string, number>;
+    frequentPaths: Map<string, number>;
+    interactionCount: number;
+    successRate: number;
+  }>();
+
+  /**
+   * Track user interaction for learning
+   */
+  trackUserInteraction(userId: string, commandType: string, success: boolean, params?: Record<string, unknown>): void {
+    let patterns = this.userPatterns.get(userId);
+    if (!patterns) {
+      patterns = {
+        commonCommands: new Map(),
+        preferredLanguages: new Map(),
+        frequentPaths: new Map(),
+        interactionCount: 0,
+        successRate: 0,
+      };
+      this.userPatterns.set(userId, patterns);
+    }
+
+    patterns.interactionCount++;
+    patterns.commonCommands.set(commandType, (patterns.commonCommands.get(commandType) ?? 0) + 1);
+
+    // Track preferred languages
+    if (params?.language) {
+      const lang = params.language as string;
+      patterns.preferredLanguages.set(lang, (patterns.preferredLanguages.get(lang) ?? 0) + 1);
+    }
+
+    // Track frequent paths
+    if (params?.path || params?.filename) {
+      const path = (params.path ?? params.filename) as string;
+      patterns.frequentPaths.set(path, (patterns.frequentPaths.get(path) ?? 0) + 1);
+    }
+
+    // Update success rate
+    const totalSuccess = patterns.successRate * (patterns.interactionCount - 1);
+    patterns.successRate = (totalSuccess + (success ? 1 : 0)) / patterns.interactionCount;
+  }
+
+  /**
+   * Get user learning context for AI prompt
+   */
+  getUserLearningContext(userId: string): string {
+    const patterns = this.userPatterns.get(userId);
+    if (!patterns || patterns.interactionCount < 3) return '';
+
+    const topCommands = Array.from(patterns.commonCommands.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([cmd, count]) => `${cmd}(${count})`)
+      .join(', ');
+
+    const topLanguages = Array.from(patterns.preferredLanguages.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([lang, count]) => `${lang}(${count})`)
+      .join(', ');
+
+    return `\n\n[USER LEARNING DATA]
+Interactions: ${patterns.interactionCount}
+Success rate: ${(patterns.successRate * 100).toFixed(0)}%
+Common commands: ${topCommands}
+Preferred languages: ${topLanguages}
+Adapt responses based on these patterns.`;
+  }
+
+  // ─── Database Operations ──────────────────────────────────────
+
+  /** Cached DB reference */
+  private db: ReturnType<typeof import('../db/index.js').getDatabase> | null = null;
+
+  /**
+   * Get database connection (lazy init)
+   */
+  private async getDb() {
+    if (!this.db) {
+      const { getDatabase } = await import('../db/index.js');
+      this.db = getDatabase();
+    }
+    return this.db;
+  }
+
   /**
    * Initialize conversation context table
    */
-  private initContextDB(): void {
+  private async initContextDB(): Promise<void> {
     if (this.dbInitialized) return;
     try {
-      const { getDatabase } = require('../db/index.js');
-      const db = getDatabase();
+      const db = await this.getDb();
       const sqlite = db.$client;
       sqlite.exec(`
         CREATE TABLE IF NOT EXISTS conversation_context (
@@ -566,63 +906,87 @@ export class AIService {
   /**
    * Load conversation context from database
    */
-  private loadContext(userId: string): void {
-    this.initContextDB();
+  private async loadContext(userId: string): Promise<void> {
+    await this.initContextDB();
     try {
-      const { getDatabase } = require('../db/index.js');
-      const db = getDatabase();
+      const db = await this.getDb();
       const sqlite = db.$client;
-      const row = sqlite.prepare('SELECT history, last_action FROM conversation_context WHERE user_id = ?').get(userId) as any;
+      interface ConversationRow {
+        user_id: string;
+        history: string;
+        last_action: string | null;
+        updated_at: string;
+      }
+      const row = sqlite.prepare(
+        'SELECT history, last_action FROM conversation_context WHERE user_id = ?'
+      ).get(userId) as ConversationRow | undefined;
       if (row) {
         this.conversationContext.set(userId, JSON.parse(row.history ?? '[]'));
         if (row.last_action) {
           this.lastAction.set(userId, JSON.parse(row.last_action));
         }
       }
-    } catch {
-      // Ignore errors
+    } catch (err) {
+      logger.debug({ err, userId }, 'Failed to load conversation context');
     }
   }
 
   /**
    * Save conversation context to database
    */
-  private saveContext(userId: string): void {
-    this.initContextDB();
+  private async saveContext(userId: string): Promise<void> {
+    await this.initContextDB();
     try {
-      const { getDatabase } = require('../db/index.js');
-      const db = getDatabase();
+      const db = await this.getDb();
       const sqlite = db.$client;
-      const history = this.getContext(userId);
-      const lastAct = this.getLastAction(userId) ?? null;
+      const history = await this.getContext(userId);
+      const lastAct = await this.getLastAction(userId) ?? null;
       const now = new Date().toISOString();
 
       sqlite.prepare(`
         INSERT OR REPLACE INTO conversation_context (user_id, history, last_action, updated_at)
         VALUES (?, ?, ?, ?)
       `).run(userId, JSON.stringify(history), JSON.stringify(lastAct), now);
-    } catch {
-      // Ignore errors
+    } catch (err) {
+      logger.debug({ err, userId }, 'Failed to save conversation context');
     }
   }
 
   /**
    * Get conversation context (loads from DB if needed)
    */
-  private getContext(userId: string): Array<{ role: string; content: string }> {
+  private async getContext(userId: string): Promise<Array<{ role: string; content: string }>> {
     if (!this.conversationContext.has(userId)) {
-      this.loadContext(userId);
+      await this.loadContext(userId);
     }
-    return this.getContext(userId);
+    return this.conversationContext.get(userId) ?? [];
   }
 
   /**
    * Get last action (loads from DB if needed)
    */
-  private getLastAction(userId: string): { type: string; params: Record<string, unknown>; timestamp: number } | undefined {
+  private async getLastAction(userId: string): Promise<{ type: string; params: Record<string, unknown>; timestamp: number } | undefined> {
     if (!this.lastAction.has(userId)) {
-      this.loadContext(userId);
+      await this.loadContext(userId);
     }
+    return this.lastAction.get(userId);
+  }
+
+  /**
+   * Set last action for context memory
+   * Public method so routes can update last action with full path info
+   */
+  setLastAction(userId: string, action: { type: string; params: Record<string, unknown> }): void {
+    this.lastAction.set(userId, {
+      ...action,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Get last action for a user (public method for routes)
+   */
+  async getLastActionForUser(userId: string): Promise<{ type: string; params: Record<string, unknown>; timestamp: number } | undefined> {
     return this.getLastAction(userId);
   }
 
@@ -719,7 +1083,7 @@ export class AIService {
   }
 
   /**
-   * Interpret complex natural language using Gemini API.
+   * Interpret complex natural language using Gemini API with Function Calling.
    * Falls back gracefully if API is unavailable.
    */
   async interpretWithAI(text: string, userId?: string): Promise<MatchedIntent | null> {
@@ -736,66 +1100,122 @@ export class AIService {
       return null;
     }
 
-    // Use original text — don't preprocess (AI needs full context)
     const processedText = text.trim();
 
     try {
       const selectedModel = selectModel(processedText);
-      logger.info({ text: processedText.slice(0, 100), model: selectedModel, url: `${GEMINI_API_URL}/${selectedModel}:generateContent` }, 'Calling Gemini API');
+      logger.info({ text: processedText.slice(0, 100), model: selectedModel }, 'Calling Gemini API with function calling');
 
-      // Build context-aware prompt with FULL conversation history + last action
+      // Build context-aware prompt
       let contextPrefix = '';
       if (userId) {
-        const history = this.getContext(userId);
+        const history = await this.getContext(userId);
         if (history.length > 0) {
           const historyText = history.slice(-20).map(m => `${m.role}: ${m.content.slice(0, 2000)}`).join('\n');
           contextPrefix = `\n\nConversation history:\n${historyText}`;
         }
 
         // Add last action context for pronoun resolution
-        const last = this.getLastAction(userId);
-        if (last && Date.now() - last.timestamp < 30 * 60 * 1000) { // 30 minutes
-          contextPrefix += `\n\nLast action: type=${last.type}, params=${JSON.stringify(last.params).slice(0, 1000)}`;
-          contextPrefix += `\nWhen user says "nó", "file đó", "thư mục đó" → refer to this last action.`;
+        const last = await this.getLastAction(userId);
+        if (last && Date.now() - last.timestamp < 30 * 60 * 1000) {
+          const paramsStr = JSON.stringify(last.params).slice(0, 1000);
+          contextPrefix += `\n\nLast action: type=${last.type}, params=${paramsStr}`;
+
+          if (last.params.path) {
+            contextPrefix += `\nFull file path: ${last.params.path}`;
+          } else if (last.params.filename) {
+            const desktop = process.env.USERPROFILE ? `${process.env.USERPROFILE}\\Desktop` : 'C:\\Users\\Admin\\Desktop';
+            contextPrefix += `\nFull file path: ${desktop}\\${last.params.filename}`;
+          }
+
+          contextPrefix += `\nWhen user says "nó", "file đó", "thư mục đó" → use the FULL path from last action.`;
         }
       }
 
-      const fullPrompt = `${GEMINI_SYSTEM_PROMPT}${contextPrefix}\n\nUser: "${processedText}"\n\nResponse:`;
+      const userMessage = contextPrefix
+        ? `${contextPrefix}\n\nUser: "${processedText}"`
+        : `User: "${processedText}"`;
 
-      // Use API key as query parameter with selected model
+      // Detect user emotion (runtime, not just prompt)
+      const emotion = detectEmotion(processedText);
+      let systemPromptWithEmotion = injectEmotionalContext(GEMINI_SYSTEM_PROMPT, emotion);
+
+      // Add user learning context
+      if (userId) {
+        const learningContext = this.getUserLearningContext(userId);
+        if (learningContext) {
+          systemPromptWithEmotion += learningContext;
+        }
+      }
+
+      if (emotion.emotion !== 'neutral') {
+        logger.info({ emotion: emotion.emotion, confidence: emotion.confidence }, 'Emotion detected');
+      }
+
+      // Try function calling first (more reliable)
       const url = `${GEMINI_API_URL}/${selectedModel}:generateContent?key=${config.gemini.apiKey}`;
 
-      const response = await axios.post<GeminiResponse>(
-        url,
-        {
-          contents: [{ parts: [{ text: fullPrompt }] }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 65536,
-            topP: 0.95,
-          },
-          safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-          ],
+      const requestBody = {
+        systemInstruction: { parts: [{ text: systemPromptWithEmotion }] },
+        contents: [{ parts: [{ text: userMessage }] }],
+        tools: [{
+          functionDeclarations: GEMINI_FUNCTION_DECLARATIONS,
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 65536,
+          topP: 0.95,
         },
-        { timeout: 120_000 },
-      );
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+        ],
+      };
 
-      const aiText = response.data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      logger.info({ aiText: aiText?.slice(0, 500), fullResponse: JSON.stringify(response.data).slice(0, 1000) }, 'Gemini response received');
-      if (!aiText) {
-        logger.warn({ responseData: JSON.stringify(response.data) }, 'Gemini returned empty response');
+      const responseData = await callGeminiWithFallback(url, requestBody, 120_000);
+      const candidate = responseData.candidates?.[0];
+
+      if (!candidate) {
+        logger.warn({ responseData: JSON.stringify(responseData) }, 'Gemini returned no candidates');
         return null;
       }
 
-      // Parse JSON response
+      // Check for function call response
+      const parts = candidate.content?.parts as Array<Record<string, unknown>> | undefined;
+      const functionCallPart = parts?.find(p => p.functionCall);
+      const functionCall = functionCallPart?.functionCall as { name: string; args: Record<string, unknown> } | undefined;
+      if (functionCall) {
+        logger.info({ function: functionCall.name, args: JSON.stringify(functionCall.args).slice(0, 500) }, 'Gemini function call received');
+
+        const intent = this.convertFunctionCallToIntent(functionCall.name, functionCall.args);
+        if (intent) {
+          // Cache and update context
+          if (intent.type !== 'free_response') {
+            this.cacheResponse(cacheKey, intent);
+          }
+
+          if (userId) {
+            await this.updateContext(userId, text, intent);
+          }
+
+          return { ...intent, source: 'ai', originalInput: text };
+        }
+      }
+
+      // Fallback: check for text response (may contain <action> tags)
+      const aiText = candidate.content?.parts?.[0]?.text?.trim();
+      logger.info({ aiText: aiText?.slice(0, 500) }, 'Gemini text response received');
+
+      if (!aiText) {
+        logger.warn({ responseData: JSON.stringify(responseData) }, 'Gemini returned empty response');
+        return null;
+      }
+
+      // Parse text response (legacy <action> tag format)
       const parsed = this.parseAIResponse(aiText);
       if (!parsed) {
-        // If JSON parsing fails, treat the entire response as a free_response
-        logger.info({ aiText: aiText.slice(0, 200) }, 'Non-JSON response, treating as free_response');
         const freeResult: MatchedIntent = {
           type: 'free_response',
           params: {},
@@ -805,52 +1225,22 @@ export class AIService {
           response: aiText,
         };
 
-        // Update conversation context
         if (userId) {
-          const ctx = this.getContext(userId);
-          ctx.push({ role: 'user', content: text });
-          ctx.push({ role: 'assistant', content: aiText.slice(0, 4000) });
-          this.conversationContext.set(userId, ctx.slice(-50));
-          this.saveContext(userId);
+          await this.updateContext(userId, text, freeResult);
         }
 
         return freeResult;
       }
 
-      // Cache the result (not free_response)
       if (parsed.type !== 'free_response') {
         this.cacheResponse(cacheKey, parsed);
       }
 
-      // Update conversation context and last action
       if (userId) {
-        const ctx = this.getContext(userId);
-        ctx.push({ role: 'user', content: text });
-        const responsePreview = parsed.type === 'free_response'
-          ? (parsed.response ?? '').slice(0, 4000)
-          : `[${parsed.type}] ${JSON.stringify(parsed.params).slice(0, 1000)}`;
-        ctx.push({ role: 'assistant', content: responsePreview });
-        this.conversationContext.set(userId, ctx.slice(-50));
-
-        // Track last action for pronoun resolution
-        if (parsed.type !== 'free_response' && parsed.type !== 'clarification') {
-          this.lastAction.set(userId, {
-            type: parsed.type,
-            params: parsed.params ?? {},
-            timestamp: Date.now(),
-          });
-        }
-
-        this.saveContext(userId);
+        await this.updateContext(userId, text, parsed);
       }
 
-      logger.info({
-        text,
-        type: parsed.type,
-        confidence: parsed.confidence,
-        source: 'ai',
-      }, 'AI interpreted intent');
-
+      logger.info({ text, type: parsed.type, confidence: parsed.confidence, source: 'ai' }, 'AI interpreted intent');
       return { ...parsed, source: 'ai', originalInput: text };
     } catch (err) {
       if (axios.isAxiosError(err)) {
@@ -864,6 +1254,154 @@ export class AIService {
       }
       return null;
     }
+  }
+
+  /**
+   * Convert Gemini function call to MatchedIntent
+   */
+  private convertFunctionCallToIntent(name: string, args: Record<string, unknown>): MatchedIntent | null {
+    const functionMap: Record<string, { type: string; paramMapper: (args: Record<string, unknown>) => Record<string, unknown> }> = {
+      create_file: {
+        type: 'create_file',
+        paramMapper: (a) => ({ filename: a.filename, content: a.content, run: a.run ?? false }),
+      },
+      create_files: {
+        type: 'create_files',
+        paramMapper: (a) => ({ files: a.files }),
+      },
+      execute_shell: {
+        type: 'shell',
+        paramMapper: (a) => ({ command: a.command }),
+      },
+      get_status: {
+        type: 'status',
+        paramMapper: () => ({}),
+      },
+      take_screenshot: {
+        type: 'screenshot',
+        paramMapper: () => ({}),
+      },
+      list_processes: {
+        type: 'process_list',
+        paramMapper: () => ({}),
+      },
+      read_file: {
+        type: 'file_read',
+        paramMapper: (a) => ({ path: a.path }),
+      },
+      process_file: {
+        type: 'process_file',
+        paramMapper: (a) => ({ path: a.path }),
+      },
+      search_files: {
+        type: 'file_search',
+        paramMapper: (a) => ({ pattern: `**/*${a.pattern}*`, path: a.path }),
+      },
+      launch_app: {
+        type: 'app_launch',
+        paramMapper: (a) => ({ name: a.name }),
+      },
+      kill_process: {
+        type: 'process_kill',
+        paramMapper: (a) => ({ name: a.name }),
+      },
+      set_volume: {
+        type: 'set_volume',
+        paramMapper: (a) => ({ level: a.level, action: a.action }),
+      },
+      lock_screen: {
+        type: 'lock_screen',
+        paramMapper: () => ({}),
+      },
+      send_notification: {
+        type: 'notify',
+        paramMapper: (a) => ({ title: a.title ?? 'RemoteOS', body: a.body }),
+      },
+      web_search: {
+        type: 'web_search',
+        paramMapper: (a) => ({ query: a.query }),
+      },
+      open_in_vscode: {
+        type: 'open_in_vscode',
+        paramMapper: (a) => ({ path: a.path }),
+      },
+      open_project: {
+        type: 'open_in_vscode',
+        paramMapper: (a) => ({ path: a.path, editor: a.ide ?? 'vscode' }),
+      },
+      run_code: {
+        type: 'execute_code',
+        paramMapper: (a) => ({ language: a.language, code: a.code, filename: a.filename }),
+      },
+      verify_code: {
+        type: 'shell',
+        paramMapper: (a) => {
+          const path = a.path as string;
+          const ext = path?.split('.').pop()?.toLowerCase();
+          const cmds: Record<string, string> = {
+            py: `python "${path}"`,
+            js: `node "${path}"`,
+            ts: `npx tsx "${path}"`,
+            go: `go run "${path}"`,
+            rs: `cargo run`,
+            java: `javac "${path}" && java "${path?.replace('.java', '')}"`,
+          };
+          return { command: cmds[ext ?? ''] ?? `echo "Cannot verify .${ext} files"` };
+        },
+      },
+      desktop_click: {
+        type: 'desktop_click',
+        paramMapper: (a) => ({ x: a.x, y: a.y }),
+      },
+      desktop_type: {
+        type: 'desktop_type',
+        paramMapper: (a) => ({ text: a.text }),
+      },
+      desktop_keys: {
+        type: 'desktop_keys',
+        paramMapper: (a) => ({ keys: a.keys }),
+      },
+    };
+
+    const mapping = functionMap[name];
+    if (!mapping) {
+      logger.warn({ functionName: name }, 'Unknown function call from Gemini');
+      return null;
+    }
+
+    return {
+      type: mapping.type,
+      params: mapping.paramMapper(args),
+      confidence: 0.95,
+      source: 'ai',
+      originalInput: '',
+    };
+  }
+
+  /**
+   * Update conversation context and last action
+   */
+  private async updateContext(userId: string, text: string, intent: MatchedIntent): Promise<void> {
+    const ctx = await this.getContext(userId);
+    ctx.push({ role: 'user', content: text });
+    const responsePreview = intent.type === 'free_response'
+      ? (intent.response ?? '').slice(0, 4000)
+      : `[${intent.type}] ${JSON.stringify(intent.params).slice(0, 1000)}`;
+    ctx.push({ role: 'assistant', content: responsePreview });
+    this.conversationContext.set(userId, ctx.slice(-50));
+
+    if (intent.type !== 'free_response' && intent.type !== 'clarification') {
+      this.lastAction.set(userId, {
+        type: intent.type,
+        params: intent.params ?? {},
+        timestamp: Date.now(),
+      });
+
+      // Track user interaction for learning
+      this.trackUserInteraction(userId, intent.type, true, intent.params);
+    }
+
+    await this.saveContext(userId);
   }
 
   /**
@@ -881,14 +1419,26 @@ export class AIService {
     // Build context
     let contextPrefix = '';
     if (userId) {
-      const history = this.getContext(userId);
+      const history = await this.getContext(userId);
       if (history.length > 0) {
         const historyText = history.slice(-10).map(m => `${m.role}: ${m.content.slice(0, 1000)}`).join('\n');
         contextPrefix = `\n\nConversation history:\n${historyText}`;
       }
     }
 
-    const fullPrompt = `${GEMINI_SYSTEM_PROMPT}${contextPrefix}\n\nUser: "${text.trim()}"\n\nResponse:`;
+    // Streaming-specific prompt — natural conversation, no function calls
+    const streamingPrompt = `Bạn là RemoteOS AI — trợ lý AI thông minh và thân thiện.
+
+Phong cách: Nói chuyện tự nhiên như ChatGPT/Gemini. Dùng emoji 😊🎉💪. Không robot, không khuôn mẫu.
+
+Quy tắc:
+- Trả lời trực tiếp, ngắn gọn nhưng đầy đủ
+- Không dùng JSON hay action tags
+- Không nói "tôi là AI" hay "tôi không thể"
+- Luôn nhiệt tình, vui vẻ, hữu ích
+- Nếu user hỏi về máy tính → trả lời tự nhiên, không format phức tạp`;
+
+    const fullPrompt = `${streamingPrompt}${contextPrefix}\n\nUser: "${text.trim()}"\n\nResponse:`;
 
     // Use streaming API
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=${config.gemini.apiKey}`;
@@ -957,10 +1507,39 @@ export class AIService {
   }
 
   /**
-   * Parse Gemini's JSON response into a MatchedIntent
+   * Parse AI response — supports both hybrid format (<action> tags) and legacy JSON format
    */
   private parseAIResponse(text: string): MatchedIntent | null {
     try {
+      // ─── NEW: Hybrid format with <action> tags ─────────────────
+      // Check for <action> tags in the raw text FIRST
+      const actionBlocks = this.extractActionBlocks(text);
+      if (actionBlocks.length > 0) {
+        // Extract conversation text (everything outside <action> tags)
+        const conversationText = text
+          .replace(/<action>[\s\S]*?<\/action>/g, '')
+          .trim();
+
+        // Parse the first action
+        const firstAction = actionBlocks[0]!;
+
+        // If there are multiple actions, store them all
+        const allIntents = actionBlocks.length > 1
+          ? actionBlocks.map(a => ({ type: a.type, params: a.params }))
+          : undefined;
+
+        return {
+          type: firstAction.type,
+          params: firstAction.params,
+          confidence: 0.95,
+          source: 'ai',
+          originalInput: '',
+          response: conversationText || undefined,
+          allIntents,
+        };
+      }
+
+      // ─── LEGACY: Pure JSON format (backward compatible) ────────
       // Try to extract JSON from the response (handle markdown code blocks)
       let jsonStr = text;
       const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -971,24 +1550,89 @@ export class AIService {
       // Try to find JSON object in the text
       const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        return null;
+        // No JSON found — treat entire response as natural conversation
+        return {
+          type: 'free_response',
+          params: {},
+          confidence: 0.9,
+          source: 'ai',
+          originalInput: '',
+          response: text.trim(),
+        };
       }
 
-      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      } catch {
+        // Try to fix common JSON issues (unescaped newlines in strings)
+        const fixedJson = jsonMatch[0].replace(/(?<=: ")((?:[^"\\]|\\.)*)?(?=")/gs, (match) => {
+          return match.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+        });
+        try {
+          parsed = JSON.parse(fixedJson) as Record<string, unknown>;
+        } catch {
+          // Give up on JSON parsing, treat as free_response
+          return {
+            type: 'free_response',
+            params: {},
+            confidence: 0.8,
+            source: 'ai',
+            originalInput: '',
+            response: text.trim(),
+          };
+        }
+      }
 
       // Single intent
       if (parsed.type && typeof parsed.type === 'string') {
-        if (parsed.type === 'unknown') return null;
+        if (parsed.type === 'unknown') {
+          return {
+            type: 'free_response',
+            params: {},
+            confidence: 0.8,
+            source: 'ai',
+            originalInput: '',
+            response: text.trim(),
+          };
+        }
 
-        // Handle free_response type — return the response text directly
+        // Handle free_response type — check for embedded <action> blocks
         if (parsed.type === 'free_response' && parsed.response) {
+          const responseText = parsed.response as string;
+
+          // Check if response contains <action> blocks
+          const embeddedActions = this.extractActionBlocks(responseText);
+          if (embeddedActions.length > 0) {
+            // Extract conversation text from response
+            const conversationText = responseText
+              .replace(/<action>[\s\S]*?<\/action>/g, '')
+              .trim();
+
+            const firstAction = embeddedActions[0]!;
+            const allIntents = embeddedActions.length > 1
+              ? embeddedActions.map(a => ({ type: a.type, params: a.params }))
+              : undefined;
+
+            return {
+              type: firstAction.type,
+              params: firstAction.params,
+              confidence: 0.95,
+              source: 'ai',
+              originalInput: '',
+              response: conversationText || undefined,
+              allIntents,
+            };
+          }
+
+          // No embedded actions — return as free_response
           return {
             type: 'free_response',
             params: {},
             confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.9,
             source: 'ai',
             originalInput: '',
-            response: parsed.response as string,
+            response: responseText,
           };
         }
 
@@ -1016,19 +1660,23 @@ export class AIService {
           };
         }
 
-        // Handle create_file type — single file
-        if (parsed.type === 'create_file' && parsed.filename && parsed.content) {
-          return {
-            type: 'create_file',
-            params: {
-              filename: parsed.filename,
-              content: parsed.content,
-              run: parsed.run === true,
-            },
-            confidence: 0.95,
-            source: 'ai',
-            originalInput: '',
-          };
+        // Handle create_file type — single file (support multiple formats)
+        if (parsed.type === 'create_file') {
+          const filename = parsed.filename ?? (parsed.params as Record<string, unknown>)?.path;
+          const content = parsed.content ?? (parsed.params as Record<string, unknown>)?.content;
+          if (filename && content) {
+            return {
+              type: 'create_file',
+              params: {
+                filename: filename as string,
+                content: content as string,
+                run: parsed.run === true,
+              },
+              confidence: 0.95,
+              source: 'ai',
+              originalInput: '',
+            };
+          }
         }
 
         return {
@@ -1068,8 +1716,65 @@ export class AIService {
       return null;
     } catch (err) {
       logger.warn({ err, text: text.slice(0, 200) }, 'Failed to parse AI response');
-      return null;
+      // On parse error, treat as natural conversation
+      return {
+        type: 'free_response',
+        params: {},
+        confidence: 0.7,
+        source: 'ai',
+        originalInput: '',
+        response: text.trim(),
+      };
     }
+  }
+
+  /**
+   * Extract action blocks from hybrid response format
+   * Looks for <action>...</action> tags containing JSON
+   */
+  private extractActionBlocks(text: string): Array<{ type: string; params: Record<string, unknown> }> {
+    const actions: Array<{ type: string; params: Record<string, unknown> }> = [];
+    const actionRegex = /<action>([\s\S]*?)<\/action>/g;
+    let match;
+
+    while ((match = actionRegex.exec(text)) !== null) {
+      try {
+        const jsonStr = match[1]!.trim();
+        const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+
+        if (parsed.type && typeof parsed.type === 'string') {
+          // Handle create_file — support multiple formats
+          if (parsed.type === 'create_file') {
+            const filename = parsed.filename ?? (parsed.params as Record<string, unknown>)?.path;
+            const content = parsed.content ?? (parsed.params as Record<string, unknown>)?.content;
+            if (filename && content) {
+              actions.push({
+                type: 'create_file',
+                params: {
+                  filename: filename as string,
+                  content: content as string,
+                  run: parsed.run === true,
+                },
+              });
+            }
+          } else if (parsed.type === 'create_files' && Array.isArray(parsed.files)) {
+            actions.push({
+              type: 'create_files',
+              params: { files: parsed.files },
+            });
+          } else {
+            actions.push({
+              type: parsed.type,
+              params: (parsed.params as Record<string, unknown>) ?? {},
+            });
+          }
+        }
+      } catch (err) {
+        logger.debug({ err, block: match[1]?.slice(0, 100) }, 'Failed to parse action block');
+      }
+    }
+
+    return actions;
   }
 
   /**

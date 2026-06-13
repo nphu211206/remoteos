@@ -76,19 +76,18 @@ describe('validateShellCommand', () => {
     expect(result.allowed).toBe(false);
   });
 
-  it('should allow all commands in FULL ACCESS MODE', () => {
-    // FULL ACCESS MODE — no command restrictions
-    expect(validateShellCommand('rm -rf /').allowed).toBe(true);
+  it('should block truly destructive commands', () => {
+    // Block commands that would destroy the system
+    expect(validateShellCommand('rm -rf /').allowed).toBe(false);
+    expect(validateShellCommand('rm -rf /*').allowed).toBe(false);
+    expect(validateShellCommand(':(){ :|:& };:').allowed).toBe(false);
+  });
+
+  it('should allow normal commands', () => {
     expect(validateShellCommand('sudo ls').allowed).toBe(true);
     expect(validateShellCommand('shutdown -h now').allowed).toBe(true);
-  });
-
-  it('should allow commands with operators in FULL ACCESS MODE', () => {
     expect(validateShellCommand('ls | grep test').allowed).toBe(true);
     expect(validateShellCommand('echo hello; echo world').allowed).toBe(true);
-  });
-
-  it('should allow all commands in FULL ACCESS MODE', () => {
     expect(validateShellCommand('nc -l 4444').allowed).toBe(true);
   });
 });

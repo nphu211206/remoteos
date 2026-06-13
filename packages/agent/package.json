@@ -21,11 +21,14 @@
   "dependencies": {
     "@remoteos/shared": "workspace:*",
     "axios": "^1.7.0",
+    "dotenv": "^17.4.2",
+    "glob": "^13.0.6",
+    "nanoid": "^5.0.9",
     "node-screenshots": "^0.2.0",
-    "systeminformation": "^5.23.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
-    "nanoid": "^5.0.9"
+    "puppeteer": "^25.1.0",
+    "systeminformation": "^5.23.0"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

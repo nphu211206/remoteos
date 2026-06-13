@@ -12,203 +12,70 @@
 
 import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
+import type { DeviceSummary } from '@remoteos/shared';
+import { formatBytes, formatProgressBar } from '@remoteos/shared/utils';
+import { formatCommandResponse } from '../utils/formatters.js';
 import { ServerClient } from '../client/server-client.js';
 import { config } from '../config/index.js';
 import { logger } from '../config/logger.js';
 
+/**
+ * Stream AI response via SSE for real-time conversation
+ */
+async function streamAIResponse(
+  text: string,
+  onUpdate: (chunk: string) => Promise<void>,
+): Promise<string> {
+  try {
+    const axios = (await import('axios')).default;
+    const response = await axios.post(
+      `${config.server.url}/api/v1/stream`,
+      { text },
+      { responseType: 'stream', timeout: 60000 }
+    );
+
+    let fullText = '';
+    let lastUpdate = 0;
+
+    return new Promise((resolve, reject) => {
+      response.data.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        if (text.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(text.slice(6));
+            if (data.text) {
+              fullText += data.text;
+              // Update UI every 500ms to avoid rate limits
+              if (Date.now() - lastUpdate > 500) {
+                onUpdate(fullText);
+                lastUpdate = Date.now();
+              }
+            }
+            if (data.done) {
+              resolve(fullText);
+            }
+          } catch {}
+        }
+      });
+
+      response.data.on('end', () => resolve(fullText));
+      response.data.on('error', (err: Error) => reject(err));
+    });
+  } catch (err) {
+    logger.error({ err }, 'Streaming failed');
+    throw err;
+  }
+}
+
 const serverClient = new ServerClient(config.server.url);
 
-// ─── Intent Pattern Matching ──────────────────────────────────────
-
-interface IntentPattern {
-  type: string;
-  patterns: RegExp[];
-  extractParams?: (text: string) => Record<string, unknown>;
-}
-
-const INTENT_PATTERNS: IntentPattern[] = [
-  // Status
-  {
-    type: 'status',
-    patterns: [
-      /(máy tính|computer|pc|server).*(thế nào|status|trạng thái|ổn không|có sao không|how|sao rồi|ra sao|như nào|ok không|bình thường|ổn|tốt không)/i,
-      /^(status|trạng thái|máy tính thế nào|máy tính sao rồi|máy tính ok không)$/i,
-      /(kiểm tra|check|xem).*(máy tính|computer|pc|system|hệ thống)/i,
-    ],
-  },
-  // Screenshot
-  {
-    type: 'screenshot',
-    patterns: [
-      /(chụp|screenshot|capture|màn hình|screen|ảnh|snap)/i,
-      /(xem|show).*(màn hình|screen|desktop)/i,
-    ],
-  },
-  // Process list
-  {
-    type: 'process_list',
-    patterns: [
-      /(tiến trình|process|task|đang chạy|running|app|chương trình)/i,
-    ],
-  },
-  // Download
-  {
-    type: 'file_download',
-    patterns: [
-      /(tải|download|load|lấy|grab|tải về).*(https?:\/\/[^\s]+)/i,
-      /(https?:\/\/[^\s]+).*(tải|download|về máy)/i,
-    ],
-    extractParams: (text) => {
-      const urlMatch = text.match(/(https?:\/\/[^\s]+)/i);
-      return { url: urlMatch?.[1] ?? '' };
-    },
-  },
-  // File list
-  {
-    type: 'file_list',
-    patterns: [
-      /(file|thư mục|folder|directory|ls|dir|danh sách file)/i,
-    ],
-    extractParams: (text) => {
-      const pathMatch = text.match(/(file|thư mục|folder)\s+(.+)/i);
-      return { path: pathMatch?.[2]?.trim() ?? '.' };
-    },
-  },
-  // Notify
-  {
-    type: 'notify',
-    patterns: [
-      /(thông báo|notify|nhắc|remind|alert|note|ghi chú)/i,
-    ],
-    extractParams: (text) => {
-      const message = text.replace(/(thông báo|notify|nhắc|remind|alert|note|ghi chú)\s*/i, '').trim();
-      return { title: 'RemoteOS', body: message || 'Notification' };
-    },
-  },
-  // System info
-  {
-    type: 'system_info',
-    patterns: [
-      /(thông tin|info|system|hệ thống|specs|cấu hình|hardware)/i,
-    ],
-  },
-  // Lock screen
-  {
-    type: 'lock_screen',
-    patterns: [
-      /(khóa|màn hình|lock|screen lock)/i,
-    ],
-  },
-  // Kill process
-  {
-    type: 'process_kill',
-    patterns: [
-      /(kill|tắt|đóng|close|stop|end|terminate|diệt).*(process|tiến trình|app)/i,
-    ],
-    extractParams: (text) => {
-      const nameMatch = text.match(/(kill|tắt|đóng|close|stop|end|terminate|diệt)\s+(.+)/i);
-      return { name: nameMatch?.[2]?.trim() };
-    },
-  },
-  // Volume
-  {
-    type: 'set_volume',
-    patterns: [
-      /(âm lượng|volume|loa|sound|tiếng).*(\d+|tăng|giảm|mute|tắt)/i,
-    ],
-    extractParams: (text) => {
-      const numMatch = text.match(/(\d+)/);
-      if (numMatch) return { level: parseInt(numMatch[1], 10) };
-      if (/tăng|up|louder/i.test(text)) return { action: 'up' };
-      if (/giảm|down|quieter/i.test(text)) return { action: 'down' };
-      if (/mute|tắt tiếng/i.test(text)) return { action: 'mute' };
-      return { level: 50 };
-    },
-  },
-  // Clipboard
-  {
-    type: 'get_clipboard',
-    patterns: [
-      /(clipboard|bảng tạm|copy|paste|sao chép)/i,
-    ],
-  },
-  // App Launch
-  {
-    type: 'app_launch',
-    patterns: [
-      /(mở|open|launch|chạy|start|run|khởi động)\s+(.+)/i,
-    ],
-    extractParams: (text) => {
-      const match = text.match(/(mở|open|launch|chạy|start|run|khởi động)\s+(.+)/i);
-      return { name: match?.[2]?.trim() ?? text };
-    },
-  },
-  // App Close
-  {
-    type: 'app_close',
-    patterns: [
-      /(đóng|close|tắt|kill|stop|thoát|exit)\s+(.+)/i,
-    ],
-    extractParams: (text) => {
-      const match = text.match(/(đóng|close|tắt|kill|stop|thoát|exit)\s+(.+)/i);
-      return { name: match?.[2]?.trim() ?? text };
-    },
-  },
-];
-
-// ─── Intent Matching ──────────────────────────────────────────────
-
-function matchIntent(text: string): { type: string; params?: Record<string, unknown> } | null {
-  const lower = text.toLowerCase().trim();
-
-  for (const pattern of INTENT_PATTERNS) {
-    for (const regex of pattern.patterns) {
-      if (regex.test(lower)) {
-        const params = pattern.extractParams?.(text) ?? {};
-        return { type: pattern.type, params };
-      }
-    }
-  }
-
-  // Bare URL → download
-  const urlMatch = text.match(/^(https?:\/\/[^\s]+)$/i);
-  if (urlMatch) {
-    return { type: 'file_download', params: { url: urlMatch[1] } };
-  }
-
-  // Time/date questions → status (includes uptime)
-  if (/(mấy giờ|what time|thời gian|ngày mấy|date|time|clock)/i.test(lower)) {
-    return { type: 'status' };
-  }
-
-  // Greetings / general questions → status
-  if (/(xin chào|hello|hi|hey|chào|yo|hế lô)/i.test(lower)) {
-    return { type: 'status' };
-  }
-
-  return null;
-}
-
-// ─── Formatting Helpers ───────────────────────────────────────────
-
-function makeProgressBar(percent: number, width = 15): string {
-  const filled = Math.round((percent / 100) * width);
-  const empty = width - filled;
-  return '█'.repeat(filled) + '░'.repeat(empty);
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
-}
+// In-memory store for last command results per user (for context)
+const lastCommandResults = new Map<string, { type: string; result: unknown; timestamp: number }>();
 
 // ─── Voice Message Handler ─────────────────────────────────────
 
-async function handleVoiceMessage(ctx: any): Promise<void> {
-  const voice = ctx.message.voice;
+async function handleVoiceMessage(ctx: BotContext): Promise<void> {
+  const voice = ctx.message?.voice;
   if (!voice) return;
 
   logger.info({ userId: ctx.from?.id, duration: voice.duration }, 'Received voice message');
@@ -225,31 +92,82 @@ async function handleVoiceMessage(ctx: any): Promise<void> {
     const axios = (await import('axios')).default;
     const audioResponse = await axios.get(fileUrl, { responseType: 'arraybuffer' });
     const audioBuffer = Buffer.from(audioResponse.data);
-
-    // Use Gemini API for speech-to-text (multimodal)
     const base64Audio = audioBuffer.toString('base64');
 
-    // For now, use a simple approach - ask user to type
-    // In production, integrate with Whisper API or Google Speech-to-Text
-    await ctx.reply(
-      '🎤 *Tính năng Voice Input*\n\n' +
-      'Tôi đã nhận được tin nhắn voice của bạn!\n\n' +
-      'Để sử dụng voice input, bạn có thể:\n' +
-      '1. Gõ lệnh trực tiếp (nhanh hơn)\n' +
-      '2. Sử dụng Telegram voice-to-text (nhấn giữ mic)\n\n' +
-      '💡 *Tip:* Nhấn giữ nút mic trên Telegram, nói lệnh, và thả ra để gửi tự động.',
-      { parse_mode: 'Markdown' }
-    );
-  } catch (err) {
-    logger.error({ err }, 'Failed to process voice message');
-    await ctx.reply('❌ Không thể xử lý tin nhắn voice. Thử gõ lệnh trực tiếp.');
+    // Send to server for voice transcription
+    const transcribeResponse = await axios.post(`${config.server.url}/api/v1/voice/transcribe`, {
+      audioBase64: base64Audio,
+      language: 'vi',
+    }, { timeout: 30000 });
+
+    const text = transcribeResponse.data?.text;
+
+    if (!text) {
+      await ctx.reply('❌ Không thể nhận diện giọng nói. Vui lòng thử lại.');
+      return;
+    }
+
+    // Show transcribed text
+    await ctx.reply(`🎤 Đã nhận diện: "${text}"\n\n⏳ Đang xử lý...`);
+
+    // Process as text command using the main handler logic
+    // Auto-select device if not selected
+    if (!ctx.session.selectedDeviceId) {
+      try {
+        const devices = await serverClient.listDevices();
+        const onlineDevice = devices.find((d: DeviceSummary) => d.status === 'online');
+        if (onlineDevice) {
+          ctx.session.selectedDeviceId = onlineDevice.id;
+        } else {
+          await ctx.reply('⚠️ Không có thiết bị online.');
+          return;
+        }
+      } catch {
+        await ctx.reply('⚠️ Không thể kết nối server.');
+        return;
+      }
+    }
+
+    // Send to AI directly — no local pattern matching
+    const aiResult = await serverClient.interpretAndExecute(text, ctx.session.selectedDeviceId!);
+
+    if (aiResult.success && aiResult.intent) {
+      const source = aiResult.intent.source === 'ai' ? '🤖 AI' : '⚡';
+
+      if (aiResult.formattedResponse) {
+        await ctx.reply(`${source} ${aiResult.formattedResponse}`, { parse_mode: 'Markdown' }).catch(() => ctx.reply(`${source} ${aiResult.formattedResponse}`));
+      } else {
+        await ctx.reply(`${source} ✅ Hoàn thành: ${aiResult.intent.type}`);
+      }
+    } else {
+      await ctx.reply(`❌ ${aiResult.error ?? 'AI không hiểu yêu cầu.'}`);
+    }
+
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Failed to process voice message');
+
+    // If voice service not configured, give helpful message
+    if (message.includes('OPENAI_API_KEY') || message.includes('not configured')) {
+      await ctx.reply(
+        '🎤 *Tính năng Voice Input*\n\n' +
+        'Server chưa cấu hình OpenAI API key.\n\n' +
+        'Bạn có thể:\n' +
+        '1. Gõ lệnh trực tiếp\n' +
+        '2. Sử dụng Telegram voice-to-text (nhấn giữ mic)\n\n' +
+        '💡 *Tip:* Nhấn giữ nút mic trên Telegram, nói lệnh, và thả ra.',
+        { parse_mode: 'Markdown' }
+      );
+    } else {
+      await ctx.reply('❌ Không thể xử lý tin nhắn voice. Thử gõ lệnh trực tiếp.');
+    }
   }
 }
 
 // ─── Photo Message Handler ─────────────────────────────────────
 
-async function handlePhotoMessage(ctx: any): Promise<void> {
-  const photos = ctx.message.photo;
+async function handlePhotoMessage(ctx: BotContext): Promise<void> {
+  const photos = ctx.message?.photo;
   if (!photos || photos.length === 0) return;
 
   logger.info({ userId: ctx.from?.id }, 'Received photo message');
@@ -269,7 +187,7 @@ async function handlePhotoMessage(ctx: any): Promise<void> {
     const base64Photo = photoBuffer.toString('base64');
 
     // Use Gemini Vision API to analyze the image
-    const caption = ctx.message.caption ?? 'Phân tích ảnh này và mô tả chi tiết những gì bạn thấy.';
+    const caption = ctx.message?.caption ?? 'Phân tích ảnh này và mô tả chi tiết những gì bạn thấy.';
 
     const geminiApiKey = process.env.GEMINI_API_KEY ?? '';
     const geminiModel = process.env.GEMINI_MODEL ?? 'gemini-3.1-flash-lite';
@@ -321,345 +239,182 @@ export function registerMessages(bot: Bot<BotContext>): void {
 
   // Handle text messages
   bot.on('message:text', async (ctx) => {
-    const text = ctx.message.text;
+    const text = ctx.message?.text;
+    if (!text) return;
+    const chatId = ctx.chat?.id;
 
     // Skip commands
     if (text.startsWith('/')) return;
+    if (!chatId) return;
 
-    // Skip if in special state
-    if (ctx.session.state !== 'idle') return;
+    logger.info({ userId: ctx.from?.id, text, chatId }, 'Processing text message');
 
-    logger.info({ userId: ctx.from?.id, text }, 'Received natural language message');
+    // Use axios directly to send messages — most reliable with raw polling
+    const axios = (await import('axios')).default;
+    const TG_API = `https://api.telegram.org/bot${config.telegram.botToken}`;
 
-    // Auto-select device if not selected
-    if (!ctx.session.selectedDeviceId) {
+    const sendMsg = async (msg: string) => {
       try {
-        const devices = await serverClient.listDevices();
-        const onlineDevice = devices.find((d) => d.status === 'online');
-        if (onlineDevice) {
-          ctx.session.selectedDeviceId = onlineDevice.id;
-          await ctx.reply(`📱 Đã tự chọn: *${onlineDevice.name}*`);
-        } else {
-          await ctx.reply(
-            '⚠️ *Không có thiết bị nào đang online.*\n\n' +
-            'Gõ `/devices` để xem danh sách.\n' +
-            'Gõ `/register` để kết nối.',
-          );
+        await axios.post(`${TG_API}/sendMessage`, {
+          chat_id: chatId,
+          text: msg,
+        }, { timeout: 10000 });
+        logger.info({ chatId, msgLen: msg.length }, 'Message sent');
+      } catch (err) {
+        logger.error({ err }, 'Failed to send message');
+      }
+    };
+
+    const sendPhoto = async (base64: string, caption: string) => {
+      try {
+        // Convert base64 to buffer and send as photo
+        const buffer = Buffer.from(base64, 'base64');
+        const formData = new FormData();
+        formData.append('chat_id', String(chatId));
+        formData.append('caption', caption);
+        formData.append('photo', new Blob([buffer], { type: 'image/png' }), 'screenshot.png');
+
+        await axios.post(`${TG_API}/sendPhoto`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 30000,
+        });
+        logger.info({ chatId }, 'Photo sent');
+      } catch (err) {
+        logger.error({ err }, 'Failed to send photo');
+      }
+    };
+
+    // Find online device (but don't block if offline — AI can still answer questions)
+    let deviceId: string | null = null;
+    try {
+      const devices = await serverClient.listDevices();
+      const onlineDevice = devices.find((d) => d.status === 'online');
+      if (onlineDevice) {
+        deviceId = onlineDevice.id;
+        logger.info({ device: onlineDevice.name, id: deviceId }, 'Found online device');
+      } else {
+        logger.info('No online devices found — will try AI-only responses');
+      }
+    } catch (err) {
+      logger.error({ err }, 'Failed to list devices');
+    }
+
+    // Send ALL messages to AI — no local pattern matching
+    logger.info('Sending to AI...');
+
+    // Try streaming first for pure conversation
+    if (!deviceId) {
+      try {
+        const thinkingMsg = await ctx.reply('🤖 Đang suy nghĩ...');
+        const streamedText = await streamAIResponse(text, async (chunk) => {
+          try {
+            await ctx.api.editMessageText(chatId, thinkingMsg.message_id, chunk);
+          } catch {}
+        });
+        if (streamedText) {
+          // Final update
+          try {
+            await ctx.api.editMessageText(chatId, thinkingMsg.message_id, streamedText.slice(0, 4000));
+          } catch {}
           return;
         }
-      } catch {
-        await ctx.reply('⚠️ Không thể kết nối server. Thử lại sau.');
-        return;
-      }
-    }
-
-    // Try local matching first, then AI fallback
-    const intent = matchIntent(text);
-
-    if (intent) {
-      // Local match — execute directly
-      await ctx.reply(`⚡ Đang thực hiện: *${intent.type}*...`);
-
-      try {
-        const result = await serverClient.sendCommand(
-          ctx.session.selectedDeviceId!,
-          intent.type,
-          intent.params,
-        );
-
-        // Handle screenshot specially — send as photo
-        if (intent.type === 'screenshot') {
-          const output = result as { imageData?: string; format?: string };
-          if (output.imageData) {
-            const { InputFile } = await import('grammy');
-            const imageBuffer = Buffer.from(output.imageData, 'base64');
-            await ctx.replyWithPhoto(
-              new InputFile(imageBuffer, 'screenshot.png'),
-              { caption: '📸 Screenshot — RemoteOS' },
-            );
-            return;
-          }
-        }
-
-        // Format response based on type
-        const response = formatCommandResponse(intent.type, result);
-        await ctx.reply(response, { parse_mode: 'Markdown' });
       } catch (err) {
-        logger.error({ err, intent }, 'Failed to execute intent');
-        await ctx.reply('❌ Lỗi: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        logger.debug({ err }, 'Streaming failed, falling back to normal');
       }
-      return;
     }
-
-    // No local match — use server AI (Gemini)
-    await ctx.reply('🤖 Đang suy nghĩ...');
 
     try {
-      const aiResult = await serverClient.interpretAndExecute(text, ctx.session.selectedDeviceId!);
+      // Build context from last command result
+      const userId = String(ctx.from?.id || chatId);
+      let context = '';
+      const lastResult = lastCommandResults.get(userId);
+      if (lastResult && Date.now() - lastResult.timestamp < 30 * 60 * 1000) {
+        context = `Previous command: type=${lastResult.type}, result=${JSON.stringify(lastResult.result).slice(0, 2000)}`;
+        logger.info({ lastType: lastResult.type }, 'Including last command context');
+      }
+
+      logger.info({ text, deviceId }, 'Calling AI interpret...');
+      const aiResult = await serverClient.interpretAndExecute(text, deviceId ?? undefined, context);
+      logger.info({ success: aiResult.success, type: aiResult.intent?.type }, 'AI result received');
 
       if (aiResult.success && aiResult.intent) {
         const source = aiResult.intent.source === 'ai' ? '🤖 AI' : '⚡';
+
+        // Store AI result for context in follow-up requests
+        lastCommandResults.set(userId, {
+          type: aiResult.intent.type,
+          result: aiResult.result,
+          timestamp: Date.now(),
+        });
 
         // Handle screenshot
         if (aiResult.intent.type === 'screenshot' && aiResult.result) {
           const output = aiResult.result as { imageData?: string };
           if (output.imageData) {
-            const { InputFile } = await import('grammy');
-            const imageBuffer = Buffer.from(output.imageData, 'base64');
-            await ctx.replyWithPhoto(
-              new InputFile(imageBuffer, 'screenshot.png'),
-              { caption: `${source} 📸 Screenshot — RemoteOS` },
-            );
+            await sendPhoto(output.imageData, `${source} 📸 Screenshot — RemoteOS`);
             return;
           }
         }
 
-        // Handle free_response — send AI's natural language response
-        if (aiResult.intent.type === 'free_response') {
+        // Handle agent_loop (multi-step execution)
+        if (aiResult.intent.type === 'agent_loop') {
           const allChunks = aiResult.allChunks as string[] | undefined;
           if (allChunks && allChunks.length > 1) {
-            // Send multiple messages for long responses
             for (const chunk of allChunks) {
-              await ctx.reply(chunk, { parse_mode: 'Markdown' }).catch(() => ctx.reply(chunk));
+              await sendMsg(chunk);
             }
           } else {
-            const responseText = aiResult.formattedResponse ?? '🤖 Không có phản hồi.';
-            await ctx.reply(responseText, { parse_mode: 'Markdown' }).catch(() => ctx.reply(responseText));
+            const responseText = aiResult.formattedResponse ?? '✅ Đã hoàn thành!';
+            await sendMsg(responseText);
           }
           return;
         }
 
-        // Handle clarification — show question with suggestion buttons
+        // Handle free_response (natural conversation)
+        if (aiResult.intent.type === 'free_response') {
+          const allChunks = aiResult.allChunks as string[] | undefined;
+          if (allChunks && allChunks.length > 1) {
+            for (const chunk of allChunks) {
+              await sendMsg(chunk);
+            }
+          } else {
+            const responseText = aiResult.formattedResponse ?? '🤖 Không có phản hồi.';
+            await sendMsg(responseText);
+          }
+          return;
+        }
+
+        // Handle clarification
         if (aiResult.needsClarification) {
           const clarificationText = aiResult.formattedResponse ?? 'Bạn có thể nói rõ hơn không?';
-          const suggestions = (aiResult.suggestions as string[]) ?? [];
-
-          if (suggestions.length > 0) {
-            // Create inline keyboard with suggestions
-            const { InlineKeyboard } = await import('grammy');
-            const keyboard = new InlineKeyboard();
-            for (const suggestion of suggestions.slice(0, 4)) {
-              keyboard.text(suggestion, `clarify:${suggestion}`).row();
-            }
-            keyboard.text('❌ Hủy', 'clarify:cancel');
-
-            await ctx.reply(`🤔 ${clarificationText}`, {
-              parse_mode: 'Markdown',
-              reply_markup: keyboard,
-            });
-          } else {
-            await ctx.reply(`🤔 ${clarificationText}`, { parse_mode: 'Markdown' });
-          }
+          await sendMsg(`🤔 ${clarificationText}`);
           return;
         }
 
         // Use formatted response from server
         if (aiResult.formattedResponse) {
-          // For shell commands, show a nice confirmation instead of raw output
           if (aiResult.intent.type === 'shell') {
             const result = aiResult.result as { exitCode?: number; command?: string };
             if (result?.exitCode === 0) {
-              await ctx.reply(`${source} ✅ Đã thực hiện thành công!\n\n💻 \`${result.command}\``);
+              await sendMsg(`${source} ✅ Đã thực hiện thành công!\n\n💻 ${result.command}`);
             } else {
-              await ctx.reply(`${source} ❌ Lệnh thất bại (exit: ${result?.exitCode})\n\n💻 \`${result?.command}\``);
+              await sendMsg(`${source} ❌ Lệnh thất bại (exit: ${result?.exitCode})\n\n💻 ${result?.command}`);
             }
           } else {
-            await ctx.reply(`${source} ${aiResult.formattedResponse}`, { parse_mode: 'Markdown' });
+            await sendMsg(`${source} ${aiResult.formattedResponse}`);
           }
         } else {
-          await ctx.reply(`${source} ✅ Hoàn thành: ${aiResult.intent.type}`);
+          await sendMsg(`${source} ✅ Hoàn thành: ${aiResult.intent.type}`);
         }
       } else {
-        // Show real error from server (quota, network, etc.)
         const errorMsg = aiResult.error ?? 'AI không hiểu yêu cầu.';
-        await ctx.reply(`❌ ${errorMsg}`);
+        await sendMsg(`❌ ${errorMsg}`);
       }
     } catch (err) {
       logger.error({ err, text }, 'AI interpret failed');
-      await ctx.reply('❌ Lỗi kết nối server. Thử lại sau.');
+      await sendMsg('❌ Lỗi kết nối server. Thử lại sau.');
     }
   });
 }
 
-// ─── Response Formatting ──────────────────────────────────────────
 
-function formatCommandResponse(type: string, output: unknown): string {
-  if (!output) return '✅ Hoàn thành (không có kết quả)';
-
-  const data = output as Record<string, unknown>;
-
-  switch (type) {
-    case 'status': {
-      const cpu = data.cpu as { usage: number; model: string; cores: number };
-      const ram = data.ram as { usedGb: number; totalGb: number; usagePercent: number };
-      const disk = data.disk as { usedGb: number; totalGb: number; usagePercent: number };
-      const uptime = data.uptime as { formatted: string };
-      const processes = data.processes as { total: number };
-      const temp = data.temperature as { cpu: number | null };
-
-      const lines: string[] = [
-        '╔══════════════════════════════╗',
-        '║   🖥️  SYSTEM STATUS           ║',
-        '╚══════════════════════════════╝',
-        '',
-        `🔲 CPU   ${makeProgressBar(cpu.usage)} ${cpu.usage.toFixed(1)}%`,
-        `💾 RAM   ${makeProgressBar(ram.usagePercent)} ${ram.usedGb}/${ram.totalGb} GB`,
-        `💿 Disk  ${makeProgressBar(disk.usagePercent)} ${disk.usedGb}/${disk.totalGb} GB`,
-        '',
-        `⏱️ Uptime: ${uptime.formatted}`,
-        `📊 Processes: ${processes.total}`,
-      ];
-
-      if (temp.cpu !== null) {
-        const tempEmoji = temp.cpu > 80 ? '🔴' : temp.cpu > 60 ? '🟡' : '🟢';
-        lines.push(`${tempEmoji} CPU Temp: ${temp.cpu}°C`);
-      }
-
-      return lines.join('\n');
-    }
-
-    case 'process_list': {
-      const procs = data.processes as Array<{ name: string; cpu: number; ram: number; pid: number }>;
-      const total = data.total as number;
-
-      const lines: string[] = [
-        '╔══════════════════════════════╗',
-        '║   🔧 RUNNING PROCESSES       ║',
-        '╚══════════════════════════════╝',
-        '',
-        `📊 Total: ${total} processes`,
-        '',
-      ];
-
-      for (let i = 0; i < Math.min(procs.length, 10); i++) {
-        const p = procs[i]!;
-        const cpuBar = makeProgressBar(Math.min(p.cpu, 100), 8);
-        lines.push(
-          `${i + 1}. *${p.name}* (PID: ${p.pid})`,
-          `    CPU ${cpuBar} ${p.cpu.toFixed(1)}% | RAM: ${formatBytes(p.ram * 1024 * 1024)}`,
-        );
-      }
-
-      return lines.join('\n');
-    }
-
-    case 'file_download': {
-      return [
-        '╔══════════════════════════════╗',
-        '║   📥 DOWNLOAD COMPLETE        ║',
-        '╚══════════════════════════════╝',
-        '',
-        `📄 File: ${data.fileName}`,
-        `📦 Size: ${formatBytes(data.sizeBytes as number)}`,
-        `📁 Path: ${data.filePath}`,
-      ].join('\n');
-    }
-
-    case 'file_list': {
-      const entries = data.entries as Array<{ name: string; type: string; sizeBytes: number }>;
-      const lines: string[] = [
-        `📁 *Thư mục: ${data.path}*`,
-        `📊 ${data.total} items`,
-        '',
-      ];
-
-      for (const entry of entries.slice(0, 20)) {
-        const icon = entry.type === 'directory' ? '📁' : entry.type === 'symlink' ? '🔗' : '📄';
-        const size = entry.type === 'directory' ? '' : ` (${formatBytes(entry.sizeBytes)})`;
-        lines.push(`${icon} ${entry.name}${size}`);
-      }
-
-      return lines.join('\n');
-    }
-
-    case 'shell': {
-      const exitCode = data.exitCode as number;
-      const exitEmoji = exitCode === 0 ? '✅' : '❌';
-      return [
-        `${exitEmoji} *Shell Command* (exit: ${exitCode})`,
-        '',
-        '```',
-        ((data.stdout || data.stderr || '(no output)') as string).slice(0, 3000),
-        '```',
-      ].join('\n');
-    }
-
-    case 'system_info': {
-      return [
-        '╔══════════════════════════════╗',
-        '║   💻 SYSTEM INFO              ║',
-        '╚══════════════════════════════╝',
-        '',
-        `🖥️ OS: ${data.osVersion}`,
-        `🏠 Hostname: ${data.hostname}`,
-        `🔲 CPU: ${data.cpuModel} (${data.cpuCores} cores)`,
-        `💾 RAM: ${data.totalRamGb} GB`,
-        `💿 Disk: ${data.totalDiskGb} GB`,
-        data.gpuModel ? `🎮 GPU: ${data.gpuModel}` : '',
-      ].filter(Boolean).join('\n');
-    }
-
-    case 'notify':
-      return '🔔 Đã gửi thông báo đến desktop!';
-
-    case 'lock_screen':
-      return '🔒 Đã khóa màn hình!';
-
-    case 'app_launch': {
-      const appName = data.appName as string;
-      const success = data.success as boolean;
-      const message = data.message as string;
-      return success ? `🚀 Đã mở *${appName}*!` : `❌ ${message}`;
-    }
-
-    case 'app_close': {
-      const appName = data.appName as string;
-      const success = data.success as boolean;
-      const message = data.message as string;
-      return success ? `🛑 Đã đóng *${appName}*!` : `❌ ${message}`;
-    }
-
-    case 'app_list': {
-      const apps = data.apps as string[];
-      const lines = ['📱 *Ứng dụng có sẵn:*', ''];
-      for (const app of apps.slice(0, 20)) {
-        lines.push(`• ${app}`);
-      }
-      return lines.join('\n');
-    }
-
-    default:
-      return `✅ Hoàn thành:\n\`\`\`json\n${JSON.stringify(data, null, 2).slice(0, 3000)}\n\`\`\``;
-  }
-}
-
-// ─── Smart Suggestions ────────────────────────────────────────────
-
-function getSmartSuggestions(text: string): string[] {
-  const lower = text.toLowerCase();
-  const suggestions: string[] = ['💡 *Thử một trong các cách sau:*\n'];
-
-  if (/(máy|computer|pc)/i.test(lower)) {
-    suggestions.push('• "máy tính thế nào?" → Xem trạng thái');
-  }
-  if (/(ảnh|image|screen|chụp)/i.test(lower)) {
-    suggestions.push('• "chụp màn hình" → Chụp ảnh');
-  }
-  if (/(tải|download|link|url)/i.test(lower)) {
-    suggestions.push('• "tải file này" + URL → Tải file');
-  }
-  if (/(process|app|chương trình)/i.test(lower)) {
-    suggestions.push('• "tiến trình đang chạy" → Xem processes');
-  }
-
-  if (suggestions.length === 1) {
-    suggestions.push(
-      '• "máy tính thế nào?" — Xem trạng thái',
-      '• "chụp màn hình" — Chụp ảnh màn hình',
-      '• "tải file này" + link — Tải file về máy',
-      '• Gõ /help để xem tất cả lệnh',
-    );
-  }
-
-  return suggestions;
-}

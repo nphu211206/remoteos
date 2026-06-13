@@ -8,9 +8,10 @@
 import type { Bot } from 'grammy';
 import type { BotContext } from '../bot.js';
 import { ServerClient } from '../client/server-client.js';
+import { config } from '../config/index.js';
 import { logger } from '../config/logger.js';
 
-const serverClient = new ServerClient('http://localhost:3000');
+const serverClient = new ServerClient(config.server.url);
 
 // Provider info with correct links
 const PROVIDERS: Record<string, { name: string; icon: string; link: string; models: string[] }> = {
@@ -50,7 +51,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
     if (!args || args === 'status') {
       try {
         // Try to get config from server
-        const response = await fetch(`http://localhost:3000/api/v1/users/${userId}/ai-config`);
+        const response = await fetch(`${config.server.url}/api/v1/users/${userId}/ai-config`);
         const data = await response.json() as { success: boolean; config?: { provider: string; model: string; isActive: boolean } };
 
         if (data.success && data.config) {
@@ -110,7 +111,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
     if (args === 'test') {
       await ctx.reply('🧪 Đang test kết nối AI...');
       try {
-        const response = await fetch('http://localhost:3000/api/v1/interpret', {
+        const response = await fetch('config.server.url/api/v1/interpret', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: 'hello' }),
@@ -131,7 +132,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
     // /ai reset — Reset to default
     if (args === 'reset') {
       try {
-        await fetch(`http://localhost:3000/api/v1/users/${userId}/ai-config`, {
+        await fetch(`config.server.url/api/v1/users/${userId}/ai-config`, {
           method: 'DELETE',
         });
         await ctx.reply('🔄 Đã xóa cấu hình AI. Sử dụng Gemini default.');
@@ -199,7 +200,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
 
       // Save to server
       try {
-        const response = await fetch(`http://localhost:3000/api/v1/users/${userId}/ai-config`, {
+        const response = await fetch(`config.server.url/api/v1/users/${userId}/ai-config`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ provider, apiKey, model }),

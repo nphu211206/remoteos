@@ -13,6 +13,7 @@
  *   node dist/index.js (direct)
  */
 
+import './env.js'; // Load .env first
 import { AgentDaemon } from './daemon.js';
 import { config } from './config/index.js';
 import { logger } from './config/logger.js';
