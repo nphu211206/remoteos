@@ -164,9 +164,15 @@ export async function auditMiddleware(
 // ─── Input Sanitization Middleware ─────────────────────────────
 
 const SQL_INJECTION_PATTERNS = [
-  /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|FETCH|DECLARE|TRUNCATE)\b)/i,
-  /(--|\/\*|\*\/|;|'|"|\\)/,
+  // Only detect actual SQL injection patterns, not normal English text
+  /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|FETCH|DECLARE|TRUNCATE)\b\s+.*\b(FROM|INTO|SET|WHERE|TABLE|DATABASE|INDEX)\b)/i,
   /(\b(OR|AND)\b\s+\d+\s*=\s*\d+)/i,
+  /(\bUNION\b\s+\bSELECT\b)/i,
+  /(\bDROP\b\s+\bTABLE\b)/i,
+  /(\bINSERT\b\s+\bINTO\b)/i,
+  /(\bDELETE\b\s+\bFROM\b)/i,
+  /(\bUPDATE\b\s+\b\w+\b\s+\bSET\b)/i,
+  /(;.*\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|EXEC)\b)/i,
 ];
 
 const XSS_PATTERNS = [

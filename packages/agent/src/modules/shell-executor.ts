@@ -38,8 +38,13 @@ export class ShellExecutor {
         reject(new Error('Command timed out after 60 seconds'));
       }, timeoutMs);
 
-      // For PowerShell, wrap the command properly
-      const finalCommand = isWindows ? command : command;
+      // Fix PowerShell compatibility: convert && to ; and || to ;
+      let finalCommand = command;
+      if (isWindows) {
+        finalCommand = command
+          .replace(/&&/g, ';')
+          .replace(/\|\|/g, '; ');
+      }
 
       exec(finalCommand, {
         timeout: timeoutMs,

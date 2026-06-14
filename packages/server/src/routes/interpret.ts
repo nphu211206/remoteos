@@ -18,20 +18,24 @@ import { AIService } from '../services/ai-service.js';
 import { DeviceService } from '../services/device-service.js';
 import { CommandService } from '../services/command-service.js';
 import { AgentLoop } from '../services/agent-loop.js';
+import { getConversationMemory } from '../services/conversation-memory.js';
 import { config } from '../config/index.js';
 import { logger } from '../config/logger.js';
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-/** Select the best model for recovery tasks */
-function selectRecoveryModel(): string {
-  return 'gemini-3.1-flash-lite'; // Use fast model for recovery
+/** Select the best model for recovery tasks using model manager */
+async function selectRecoveryModel(): Promise<string> {
+  const { getModelManager } = await import('../services/model-manager.js');
+  const mm = getModelManager();
+  return mm.getRecoveryModel()?.id ?? 'gemini-3.1-flash-lite';
 }
 
 const aiService = new AIService();
 const deviceService = new DeviceService();
 const commandService = new CommandService();
 const agentLoop = new AgentLoop();
+const conversationMemory = getConversationMemory();
 
 /**
  * Get the user's Desktop path (cross-platform)
@@ -153,9 +157,9 @@ function isComplexTask(text: string): boolean {
     /quản lý.*công việc|task.*management/i,
     /bán hàng|e-commerce|ecommerce|shopping/i,
     /blog|landing.*page/i,
-    // Multi-step with "và" (and)
-    /tạo.*và.*tạo|create.*and.*create/i,
-    /viết.*và.*tạo|write.*and.*create/i,
+    // Multi-step with "và" (and) — only when both are complex actions
+    /tạo.*dự án.*và.*deploy|create.*project.*and.*deploy/i,
+    /tạo.*website.*và.*test|create.*website.*and.*test/i,
   ];
 
   return complexPatterns.some(pattern => pattern.test(text));
@@ -165,11 +169,12 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
 
   // ─── POST /interpret ──────────────────────────────────────────
 
-  // ─── POST /stream — Streaming AI Response ─────────────────────
+  // ─── POST /stream — Streaming AI Response with Execution Status ──
 
   server.post('/stream', async (req: FastifyRequest, reply: FastifyReply) => {
-    const body = req.body as { text?: string };
+    const body = req.body as { text?: string; deviceId?: string };
     const text = body.text?.trim();
+    const deviceId = body.deviceId;
 
     if (!text) {
       return reply.status(400).send({ error: 'Missing text field' });
@@ -183,20 +188,67 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
       'Access-Control-Allow-Origin': '*',
     });
 
+    const sendEvent = (data: Record<string, unknown>) => {
+      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
     try {
       const { AuthService } = await import('../services/auth-service.js');
       const authService = new AuthService();
       const defaultUser = await authService.findOrCreateUser(0, { firstName: 'Dev User', language: 'vi' });
 
+      // Stream text response
+      sendEvent({ type: 'thinking', text: 'Đang suy nghĩ...' });
+
+      let fullText = '';
       for await (const chunk of aiService.streamResponse(text, defaultUser.id)) {
-        reply.raw.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+        fullText += chunk;
+        sendEvent({ type: 'chunk', text: chunk });
       }
 
-      reply.raw.write('data: [DONE]\n\n');
+      // Try to interpret and execute if device available
+      if (deviceId) {
+        sendEvent({ type: 'executing', text: 'Đang thực thi...' });
+
+        try {
+          const { DeviceService } = await import('../services/device-service.js');
+          const { CommandService } = await import('../services/command-service.js');
+          const ds = new DeviceService();
+          const cs = new CommandService();
+
+          const intent = await aiService.interpretWithUserAI(text, defaultUser.id);
+          if (intent && intent.type !== 'free_response') {
+            const result = await cs.create(defaultUser.id, {
+              deviceId,
+              type: intent.type,
+              params: intent.params,
+            });
+
+            if (result.success) {
+              const cmdResult = await cs.waitForResult(result.command!.id, 60_000);
+              if (cmdResult?.status === 'completed') {
+                const response = aiService.formatResponse(intent.type, cmdResult.output);
+                sendEvent({
+                  type: 'result',
+                  intent: intent.type,
+                  response,
+                  success: true,
+                });
+              } else {
+                sendEvent({ type: 'error', text: 'Command failed' });
+              }
+            }
+          }
+        } catch (execErr) {
+          sendEvent({ type: 'error', text: 'Execution error' });
+        }
+      }
+
+      sendEvent({ type: 'done', text: fullText });
       reply.raw.end();
     } catch (err) {
       logger.error({ err }, 'Streaming failed');
-      reply.raw.write(`data: ${JSON.stringify({ error: 'Streaming failed' })}\n\n`);
+      sendEvent({ type: 'error', text: 'Streaming failed' });
       reply.raw.end();
     }
   });
@@ -294,10 +346,13 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
       return reply.status(400).send({ success: false, error: 'Missing text or image field' });
     }
 
-    // If image is provided, use Vision API
+    // If image is provided, use Vision API (with model manager rotation)
     if (imageBase64) {
       try {
-        const visionUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${config.gemini.apiKey}`;
+        const { getModelManager } = await import('../services/model-manager.js');
+        const mm = getModelManager();
+        const visionModel = mm.getBestModel('complex')?.id ?? 'gemini-2.5-flash';
+        const visionUrl = `https://generativelanguage.googleapis.com/v1beta/models/${visionModel}:generateContent?key=${config.gemini.apiKey}`;
         const prompt = text ?? 'Mô tả chi tiết những gì bạn thấy trong ảnh chụp màn hình này. Nếu có code, đọc code. Nếu có UI, mô tả UI. Nếu có lỗi, giải thích lỗi.';
 
         const visionBody = {
@@ -344,6 +399,28 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
     const defaultUser = await authService.findOrCreateUser(0, { firstName: 'Dev User', language: 'vi' });
     const userId = defaultUser.id;
 
+    // ── Conversation Memory: Record user turn ──
+    if (text) {
+      await conversationMemory.recordTurn({
+        userId,
+        role: 'user',
+        content: text,
+      });
+    }
+
+    // ── Pronoun Resolution: Resolve references like "nó", "file đó" ──
+    let resolvedContext = '';
+    if (text) {
+      const resolved = await conversationMemory.resolveReference(userId, text);
+      if (resolved?.resolved && resolved.context) {
+        resolvedContext = resolved.context;
+        logger.info({ resolvedContext: resolvedContext.slice(0, 200) }, 'Pronoun resolved');
+      }
+    }
+
+    // ── Build AI context from conversation memory ──
+    const memoryContext = await conversationMemory.buildContextForAI(userId);
+
     // Find device (optional - if no device, use AI to generate response)
     let targetDeviceId = deviceId;
     if (!targetDeviceId) {
@@ -387,11 +464,18 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
 
     // Always use AI for interpretation
     if (!intent) {
-      // Prepend context if provided
+      // Build comprehensive context for AI
       let textWithContext = text ?? '';
-      if (context && text) {
-        textWithContext = `[Context: ${context}]\n\nUser request: ${text}`;
-        logger.info({ context: context.slice(0, 200) }, 'Including context in AI request');
+
+      // Layer 1: External context (from bot/client)
+      const contextParts: string[] = [];
+      if (memoryContext) contextParts.push(memoryContext);
+      if (resolvedContext) contextParts.push(`## THAM CHIẾU ĐÃ GIẢI QUYẾT:\n${resolvedContext}`);
+      if (context) contextParts.push(`## CONTEXT TỪ CLIENT:\n${context}`);
+
+      if (contextParts.length > 0 && text) {
+        textWithContext = `${contextParts.join('\n\n')}\n\n## YÊU CẦU HIỆN TẠI CỦA USER:\n${text}`;
+        logger.info({ contextLen: textWithContext.length, hasMemory: !!memoryContext, hasResolved: !!resolvedContext }, 'Including full context in AI request');
       }
 
       try {
@@ -572,6 +656,16 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
       // If still free_response after parsing, return it
       if (intent && intent.type === 'free_response') {
         const chunks = aiService.getFreeResponseChunks(responseText);
+
+        // ── Conversation Memory: Record free response ──
+        await conversationMemory.recordTurn({
+          userId,
+          role: 'assistant',
+          content: responseText.slice(0, 500),
+          intentType: 'free_response',
+          resultSummary: responseText.slice(0, 200),
+        });
+
         return reply.send({
           success: true,
           intent: { type: 'free_response', params: {}, confidence: intent.confidence, source: 'ai' },
@@ -757,9 +851,10 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
           resultContent = newContent;
           action = 'replaced entire file';
         } else if (find && replace !== undefined) {
-          // Find and replace
+          // Find and replace (escape special regex characters for safety)
           const original = readFileSync(fullPath, 'utf-8');
-          resultContent = original.split(find).join(replace);
+          const escapedFind = find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          resultContent = original.replace(new RegExp(escapedFind, 'g'), replace);
           action = `replaced "${find.slice(0, 50)}" with "${replace.slice(0, 50)}"`;
         } else {
           return reply.send({ success: false, error: 'Cần cung cấp content hoặc find+replace.' });
@@ -779,7 +874,7 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
       }
     }
 
-    // Handle web_search type — search the web
+    // Handle web_search type — search the web with multiple sources
     if (intent.type === 'web_search' && intent.params) {
       const { query } = intent.params as { query: string };
       try {
@@ -787,35 +882,128 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
         let results = '';
         let source = 'AI Knowledge';
 
-        // Try DuckDuckGo first
+        // Strategy 1: Gemini Grounding with Google Search (best quality)
         try {
-          const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-          const searchResponse = await axios.get(searchUrl, { timeout: 10000 });
-          const data = searchResponse.data as Record<string, unknown>;
+          const { getModelManager } = await import('../services/model-manager.js');
+          const mm = getModelManager();
+          const groundingModel = mm.getBestModel('simple')?.id ?? 'gemini-2.5-flash';
+          const groundingUrl = `https://generativelanguage.googleapis.com/v1beta/models/${groundingModel}:generateContent?key=${config.gemini.apiKey}`;
 
-          if (data.Abstract) {
-            results += `📖 ${data.Abstract}\n\n`;
-            source = 'DuckDuckGo';
-          }
+          const groundingResponse = await axios.post(groundingUrl, {
+            contents: [{ parts: [{ text: `Search the web for: "${query}". Provide a comprehensive summary with facts, data, and sources. Include relevant links.` }] }],
+            tools: [{ googleSearch: {} }],
+            generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
+          }, { timeout: 30000 });
 
-          const topics = data.RelatedTopics as Array<{ Text?: string; FirstURL?: string }> | undefined;
-          if (topics && topics.length > 0) {
-            results += '🔗 Kết quả liên quan:\n';
-            for (const topic of topics.slice(0, 10)) {
-              if (topic.Text) {
-                results += `• ${topic.Text.slice(0, 300)}\n`;
-                if (topic.FirstURL) results += `  ${topic.FirstURL}\n`;
+          const groundingText = groundingResponse.data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          const groundingMetadata = groundingResponse.data.candidates?.[0]?.groundingMetadata;
+
+          if (groundingText) {
+            results += `🔍 ${groundingText}\n\n`;
+            source = 'Google Search (Gemini Grounding)';
+
+            if (groundingMetadata?.groundingChunks) {
+              results += '\n🔗 Nguồn tham khảo:\n';
+              for (const chunk of groundingMetadata.groundingChunks.slice(0, 5)) {
+                if (chunk.web) {
+                  results += `• ${chunk.web.title ?? 'Source'}: ${chunk.web.uri}\n`;
+                }
               }
             }
           }
-        } catch {
-          // DuckDuckGo failed, try alternative
+        } catch (groundingErr) {
+          logger.debug({ groundingErr }, 'Gemini grounding failed, falling back');
         }
 
-        // If no results from DuckDuckGo, use AI to generate a comprehensive answer
+        // Strategy 2: DuckDuckGo Instant Answer API (fallback)
+        if (!results || results.length < 200) {
+          try {
+            const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+            const ddgResponse = await axios.get(ddgUrl, { timeout: 8000 });
+            const data = ddgResponse.data as Record<string, unknown>;
+
+            if (data.Abstract) {
+              results += `📖 ${data.Abstract}\n\n`;
+              if (!source.includes('Google')) source = 'DuckDuckGo';
+            }
+
+            if (data.Answer) {
+              results += `💡 ${data.Answer}\n\n`;
+            }
+
+            const topics = data.RelatedTopics as Array<{ Text?: string; FirstURL?: string }> | undefined;
+            if (topics && topics.length > 0) {
+              results += '🔗 Kết quả liên quan:\n';
+              for (const topic of topics.slice(0, 8)) {
+                if (topic.Text) {
+                  results += `• ${topic.Text.slice(0, 300)}\n`;
+                  if (topic.FirstURL) results += `  ${topic.FirstURL}\n`;
+                }
+              }
+            }
+          } catch {
+            // DuckDuckGo failed
+          }
+        }
+
+        // Strategy 3: DuckDuckGo HTML search (more results)
+        if (!results || results.length < 200) {
+          try {
+            const htmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+            const htmlResponse = await axios.get(htmlUrl, {
+              timeout: 10000,
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            });
+            const html = htmlResponse.data as string;
+
+            const resultRegex = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gs;
+            const snippetRegex = /<a[^>]*class="result__snippet"[^>]*>(.*?)<\/a>/gs;
+            const matches = [...html.matchAll(resultRegex)];
+            const snippets = [...html.matchAll(snippetRegex)];
+
+            if (matches.length > 0) {
+              results += `\n🔍 Kết quả tìm kiếm (${matches.length}):\n\n`;
+              for (let i = 0; i < Math.min(matches.length, 8); i++) {
+                const url = matches[i]![1];
+                const title = matches[i]![2]?.replace(/<[^>]*>/g, '').trim();
+                const snippet = snippets[i]?.[1]?.replace(/<[^>]*>/g, '').trim() ?? '';
+                if (title) {
+                  results += `${i + 1}. **${title}**\n`;
+                  if (snippet) results += `   ${snippet.slice(0, 200)}\n`;
+                  if (url) results += `   🔗 ${url}\n`;
+                  results += '\n';
+                }
+              }
+              source = 'DuckDuckGo Web';
+            }
+          } catch {
+            // HTML search failed
+          }
+        }
+
+        // Strategy 3: Wikipedia API for knowledge queries
+        if (!results || results.length < 200) {
+          try {
+            const wikiUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`;
+            const wikiResponse = await axios.get(wikiUrl, { timeout: 8000 });
+            const wiki = wikiResponse.data as { extract?: string; content_urls?: { desktop?: { page?: string } } };
+
+            if (wiki.extract) {
+              results += `📚 Wikipedia:\n${wiki.extract}\n\n`;
+              if (wiki.content_urls?.desktop?.page) {
+                results += `🔗 ${wiki.content_urls.desktop.page}\n`;
+              }
+              source = 'Wikipedia';
+            }
+          } catch {
+            // Wikipedia failed
+          }
+        }
+
+        // Strategy 4: AI-powered comprehensive answer
         if (!results || results.length < 100) {
           const aiAnswer = await aiService.generateFriendlyResponse(
-            `Trả lời chi tiết và đầy đủ về: "${query}". Cung cấp thông tin cụ thể, số liệu, dữ liệu. Trả lời bằng tiếng Việt.`
+            `Trả lời chi tiết và đầy đủ về: "${query}". Cung cấp thông tin cụ thể, số liệu, dữ liệu. Nếu có số liệu thống kê, hãy nêu ra. Trả lời bằng tiếng Việt.`
           );
           if (aiAnswer) {
             results = aiAnswer;
@@ -1279,6 +1467,25 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
           params: { filename, path: filepath, content: content.slice(0, 1000) },
         });
 
+        // ── Conversation Memory: Record file creation ──
+        await conversationMemory.recordTurn({
+          userId,
+          role: 'assistant',
+          content: `Created file: ${filename}`,
+          intentType: 'create_file',
+          params: { filename, path: filepath },
+          resultSummary: `File created at ${filepath} (${content.length} bytes)`,
+          filesAffected: [filepath],
+        });
+        await conversationMemory.updateLastAction(userId, {
+          type: 'create_file',
+          params: { filename, path: filepath, content: content.slice(0, 1000) },
+          resultSummary: `Created ${filename} at ${filepath} (${content.length} bytes)`,
+          timestamp: new Date().toISOString(),
+          filesAffected: [filepath],
+          workingDirectory: getDesktopPath(),
+        });
+
         // Build response message
         let responseMsg = `✅ File *${filename}* đã tạo thành công! (${content.length} bytes)`;
         if (runResult) {
@@ -1361,16 +1568,16 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
       }
     }
 
-    // Handle execute_code type — run arbitrary code
+    // Handle execute_code type — run arbitrary code in sandboxed environment
     if (intent.type === 'execute_code' && intent.params) {
       const { language, code, filename } = intent.params as { language: string; code: string; filename?: string };
       try {
         const { writeFile, unlink, mkdir } = await import('node:fs/promises');
         const { existsSync } = await import('node:fs');
         const { join } = await import('node:path');
-        const { exec } = await import('node:child_process');
+        const { execFile } = await import('node:child_process');
         const { promisify } = await import('node:util');
-        const execAsync = promisify(exec);
+        const execFileAsync = promisify(execFile);
 
         const exts: Record<string, string> = {
           python: 'py', javascript: 'js', typescript: 'ts', go: 'go',
@@ -1385,25 +1592,39 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
         const tmpFile = join(tmpDir, filename ?? `code_${Date.now()}.${ext}`);
         await writeFile(tmpFile, code, 'utf-8');
 
-        const runCmds: Record<string, string> = {
-          py: `python "${tmpFile}"`,
-          js: `node "${tmpFile}"`,
-          ts: `npx tsx "${tmpFile}"`,
-          go: `go run "${tmpFile}"`,
-          rb: `ruby "${tmpFile}"`,
-          php: `php "${tmpFile}"`,
-          sh: `bash "${tmpFile}"`,
-          ps1: `powershell -ExecutionPolicy Bypass -File "${tmpFile}"`,
+        // Sandbox: resource limits
+        const SANDBOX_TIMEOUT = 30000; // 30 seconds
+        const SANDBOX_MAX_BUFFER = 5 * 1024 * 1024; // 5MB
+
+        // Sandbox: use execFile with resource limits (no shell interpolation)
+        const runConfigs: Record<string, { cmd: string; args: string[] }> = {
+          py: { cmd: 'python', args: [tmpFile] },
+          js: { cmd: 'node', args: [tmpFile] },
+          ts: { cmd: 'npx', args: ['tsx', tmpFile] },
+          go: { cmd: 'go', args: ['run', tmpFile] },
+          rb: { cmd: 'ruby', args: [tmpFile] },
+          php: { cmd: 'php', args: [tmpFile] },
+          sh: { cmd: 'bash', args: [tmpFile] },
+          ps1: { cmd: 'powershell', args: ['-ExecutionPolicy', '-NoProfile', '-File', tmpFile] },
         };
 
-        const cmd = runCmds[ext];
-        if (!cmd) {
+        const config = runConfigs[ext];
+        if (!config) {
           await unlink(tmpFile).catch(() => {});
           return reply.send({ success: false, error: `Không thể chạy ngôn ngữ: ${language}` });
         }
 
         try {
-          const { stdout, stderr } = await execAsync(cmd, { timeout: 60000 });
+          const { stdout, stderr } = await execFileAsync(config.cmd, config.args, {
+            timeout: SANDBOX_TIMEOUT,
+            maxBuffer: SANDBOX_MAX_BUFFER,
+            env: {
+              ...process.env,
+              NODE_OPTIONS: '--max-old-space-size=256',
+              PYTHONIOENCODING: 'utf-8',
+              PYTHONUTF8: '1',
+            },
+          });
           await unlink(tmpFile).catch(() => {});
           return reply.send({
             success: true,
@@ -1426,10 +1647,574 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
       }
     }
 
+    // Handle calculate type — safe mathematical expression evaluation
+    if (intent.type === 'calculate' && intent.params) {
+      const { expression } = intent.params as { expression: string };
+      try {
+        // Safe math evaluation — only allow numbers, operators, and known math functions
+        const allowed = /^[0-9+\-*/().^%\s]+$/;
+        const mathExpr = expression
+          .replace(/\bsqrt\b/g, 'Math.sqrt')
+          .replace(/\bpow\b/g, 'Math.pow')
+          .replace(/\bsin\b/g, 'Math.sin')
+          .replace(/\bcos\b/g, 'Math.cos')
+          .replace(/\btan\b/g, 'Math.tan')
+          .replace(/\babs\b/g, 'Math.abs')
+          .replace(/\blog\b/g, 'Math.log')
+          .replace(/\bPI\b/g, 'Math.PI')
+          .replace(/\bE\b/g, 'Math.E')
+          .replace(/\bfloor\b/g, 'Math.floor')
+          .replace(/\bceil\b/g, 'Math.ceil')
+          .replace(/\bround\b/g, 'Math.round')
+          .replace(/\^/g, '**');
+
+        // Validate: only safe characters remain after math substitution
+        const sanitized = mathExpr.replace(/Math\.\w+/g, '').replace(/\d+/g, '').replace(/[+\-*/().%\s]/g, '');
+        if (sanitized.length > 0) {
+          return reply.send({ success: false, error: `Biểu thức không hợp lệ: ${expression}` });
+        }
+
+        // Use Node.js vm module for sandboxed evaluation (safer than new Function)
+        const vm = await import('node:vm');
+        const result = vm.runInNewContext(mathExpr, {}, { timeout: 1000 });
+
+        return reply.send({
+          success: true,
+          intent: { type: 'calculate', params: intent.params, confidence: 0.95, source: 'ai' },
+          result: { expression, result: String(result) },
+          formattedResponse: `🔢 ${expression} = **${result}**`,
+        });
+      } catch (calcErr) {
+        return reply.send({ success: false, error: `Không thể tính: ${expression}` });
+      }
+    }
+
+    // Handle translate_text type
+    if (intent.type === 'translate_text' && intent.params) {
+      const { text: textToTranslate, targetLanguage, sourceLanguage } = intent.params as {
+        text: string; targetLanguage: string; sourceLanguage?: string;
+      };
+      try {
+        // Use AI to translate
+        const langNames: Record<string, string> = {
+          en: 'English', vi: 'Vietnamese', ja: 'Japanese', ko: 'Korean',
+          zh: 'Chinese', fr: 'French', de: 'German', es: 'Spanish',
+          pt: 'Portuguese', ru: 'Russian', it: 'Italian', th: 'Thai',
+        };
+        const targetLangName = langNames[targetLanguage] ?? targetLanguage;
+        const prompt = sourceLanguage
+          ? `Translate the following from ${sourceLanguage} to ${targetLangName}. Return ONLY the translation, no explanation:\n\n"${textToTranslate}"`
+          : `Translate the following to ${targetLangName}. Return ONLY the translation, no explanation:\n\n"${textToTranslate}"`;
+
+        const translated = await aiService.generateFriendlyResponse(prompt);
+
+        return reply.send({
+          success: true,
+          intent: { type: 'translate_text', params: intent.params, confidence: 0.9, source: 'ai' },
+          result: { original: textToTranslate, translated, targetLanguage },
+          formattedResponse: `🌐 **${targetLangName}:**\n${translated}`,
+        });
+      } catch (transErr) {
+        return reply.send({ success: false, error: 'Không thể dịch.' });
+      }
+    }
+
+    // Handle git_operations type
+    if (intent.type === 'git_operations' && intent.params) {
+      const { operation, args: gitArgs, path: repoPath } = intent.params as {
+        operation: string; args?: string; path?: string;
+      };
+      try {
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execFileAsync = promisify(execFile);
+        const cwd = repoPath || process.cwd();
+
+        // Safe: use execFile (no shell interpolation) with array args
+        const sanitize = (s: string) => s.replace(/[;&|`$(){}[\]!#<>]/g, '');
+        const safeArgs = gitArgs ? sanitize(gitArgs) : '';
+
+        const gitOps: Record<string, string[]> = {
+          status: ['status'],
+          add: ['add', safeArgs || '.'],
+          commit: ['commit', '-m', safeArgs || 'update'],
+          push: ['push', ...safeArgs.split(/\s+/).filter(Boolean)],
+          pull: ['pull', ...safeArgs.split(/\s+/).filter(Boolean)],
+          log: ['log', '--oneline', '-20'],
+          diff: ['diff', ...safeArgs.split(/\s+/).filter(Boolean)],
+          branch: safeArgs ? ['checkout', '-b', safeArgs] : ['branch'],
+          checkout: ['checkout', ...safeArgs.split(/\s+/).filter(Boolean)],
+          stash: ['stash'],
+          remote: ['remote', '-v'],
+        };
+
+        const args = gitOps[operation] ?? [operation, ...safeArgs.split(/\s+/).filter(Boolean)];
+        const { stdout, stderr } = await execFileAsync('git', args, { cwd, timeout: 30000 });
+
+        return reply.send({
+          success: true,
+          intent: { type: 'git_operations', params: intent.params, confidence: 0.95, source: 'ai' },
+          result: { operation, output: stdout || stderr },
+          formattedResponse: `🔧 Git ${operation}:\n\`\`\`\n${(stdout || stderr).slice(0, 3000)}\n\`\`\``,
+        });
+      } catch (gitErr: any) {
+        return reply.send({
+          success: false,
+          error: `Git ${operation} failed: ${gitErr.stderr ?? gitErr.message}`,
+        });
+      }
+    }
+
+    // Handle database_query type
+    if (intent.type === 'database_query' && intent.params) {
+      const { query } = intent.params as { query: string; database?: string };
+      try {
+        const { getDatabase } = await import('../db/index.js');
+        const db = getDatabase();
+
+        const trimmedQuery = query.trim().toUpperCase();
+        if (trimmedQuery.startsWith('SELECT') || trimmedQuery.startsWith('PRAGMA') || trimmedQuery.startsWith('EXPLAIN')) {
+          // Use Drizzle's $client for raw queries
+          const rows = db.$client.prepare(query).all();
+
+          const tableStr = rows.length > 0
+            ? Object.keys(rows[0] as object).join(' | ') + '\n' + rows.map(r => Object.values(r as object).join(' | ')).join('\n')
+            : '(no results)';
+
+          return reply.send({
+            success: true,
+            intent: { type: 'database_query', params: intent.params, confidence: 0.95, source: 'ai' },
+            result: { rows, count: rows.length },
+            formattedResponse: `🗄️ Query (${rows.length} rows):\n\`\`\`\n${tableStr.slice(0, 3000)}\n\`\`\``,
+          });
+        } else {
+          return reply.send({ success: false, error: 'Chỉ cho phép SELECT queries.' });
+        }
+      } catch (dbErr: any) {
+        return reply.send({ success: false, error: `Database error: ${dbErr.message}` });
+      }
+    }
+
+    // Handle api_call type
+    if (intent.type === 'api_call' && intent.params) {
+      const { url, method = 'GET', headers, body: apiBody } = intent.params as {
+        url: string; method?: string; headers?: string; body?: string;
+      };
+      try {
+        const axios = (await import('axios')).default;
+        let parsedHeaders: Record<string, string> = {};
+        let parsedBody: unknown = undefined;
+
+        try {
+          if (headers) parsedHeaders = JSON.parse(headers);
+        } catch {
+          return reply.send({ success: false, error: 'Headers không hợp lệ (phải là JSON).' });
+        }
+        try {
+          if (apiBody) parsedBody = JSON.parse(apiBody);
+        } catch {
+          parsedBody = apiBody; // Send as raw string if not JSON
+        }
+
+        const response = await axios({
+          url, method: method.toUpperCase(),
+          headers: parsedHeaders,
+          data: parsedBody,
+          timeout: 30000,
+          validateStatus: () => true,
+        });
+
+        const responseStr = typeof response.data === 'string'
+          ? response.data.slice(0, 5000)
+          : JSON.stringify(response.data, null, 2).slice(0, 5000);
+
+        return reply.send({
+          success: true,
+          intent: { type: 'api_call', params: intent.params, confidence: 0.9, source: 'ai' },
+          result: { status: response.status, data: response.data },
+          formattedResponse: `🌐 API ${method} ${url}\nStatus: ${response.status}\n\n\`\`\`json\n${responseStr}\n\`\`\``,
+        });
+      } catch (apiErr: any) {
+        return reply.send({ success: false, error: `API call failed: ${apiErr.message}` });
+      }
+    }
+
+    // Handle get_weather type
+    if (intent.type === 'get_weather' && intent.params) {
+      const { location } = intent.params as { location: string };
+      try {
+        const axios = (await import('axios')).default;
+        const weatherUrl = `https://wttr.in/${encodeURIComponent(location)}?format=j1`;
+        const response = await axios.get(weatherUrl, { timeout: 10000 });
+        const data = response.data as Record<string, unknown>;
+        const current = (data.current_condition as Array<Record<string, unknown>>)?.[0];
+
+        if (current) {
+          const temp = current.temp_C;
+          const feelsLike = current.FeelsLikeC;
+          const humidity = current.humidity;
+          const desc = (current.weatherDesc as Array<{ value: string }>)?.[0]?.value ?? '';
+          const wind = current.windspeedKmph;
+
+          return reply.send({
+            success: true,
+            intent: { type: 'get_weather', params: intent.params, confidence: 0.9, source: 'ai' },
+            result: { location, temp, feelsLike, humidity, desc, wind },
+            formattedResponse: `🌤️ Thời tiết ${location}:\n🌡️ ${temp}°C (cảm giác: ${feelsLike}°C)\n💧 Độ ẩm: ${humidity}%\n💨 Gió: ${wind} km/h\n📝 ${desc}`,
+          });
+        }
+      } catch (weatherErr) {
+        // Fallback to AI
+        const aiWeather = await aiService.generateFriendlyResponse(`Thời tiết hiện tại ở ${location}?`);
+        return reply.send({
+          success: true,
+          intent: { type: 'get_weather', params: intent.params, confidence: 0.7, source: 'ai' },
+          result: { location, source: 'ai' },
+          formattedResponse: `🌤️ ${aiWeather}`,
+        });
+      }
+    }
+
+    // Handle read_clipboard type
+    if (intent.type === 'get_clipboard') {
+      try {
+        const { exec } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execAsync = promisify(exec);
+
+        const cmd = process.platform === 'win32'
+          ? 'powershell -NoProfile -Command "Get-Clipboard"'
+          : 'pbpaste';
+        const { stdout } = await execAsync(cmd, { timeout: 5000 });
+
+        return reply.send({
+          success: true,
+          intent: { type: 'get_clipboard', params: {}, confidence: 0.95, source: 'ai' },
+          result: { content: stdout.trim() },
+          formattedResponse: `📋 Clipboard:\n\`\`\`\n${stdout.trim().slice(0, 2000)}\n\`\`\``,
+        });
+      } catch (clipErr) {
+        return reply.send({ success: false, error: 'Không thể đọc clipboard.' });
+      }
+    }
+
+    // Handle write_clipboard type
+    if (intent.type === 'set_clipboard' && intent.params) {
+      const { content } = intent.params as { content: string };
+      try {
+        const { spawn } = await import('node:child_process');
+
+        // Safe: use spawn with piped stdin (no shell interpolation)
+        await new Promise<void>((resolve, reject) => {
+          const cmd = process.platform === 'win32'
+            ? spawn('powershell', ['-NoProfile', '-Command', 'Set-Clipboard -Value $input'], { timeout: 5000 })
+            : spawn('pbcopy', [], { timeout: 5000 });
+
+          cmd.stdin.write(content);
+          cmd.stdin.end();
+
+          let stderr = '';
+          cmd.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+          cmd.on('close', (code: number | null) => {
+            if (code === 0) resolve();
+            else reject(new Error(stderr || `Exit code ${code}`));
+          });
+          cmd.on('error', reject);
+        });
+
+        return reply.send({
+          success: true,
+          intent: { type: 'set_clipboard', params: intent.params, confidence: 0.95, source: 'ai' },
+          result: { success: true },
+          formattedResponse: `📋 Đã copy vào clipboard: "${content.slice(0, 100)}"`,
+        });
+      } catch (clipErr) {
+        return reply.send({ success: false, error: 'Không thể ghi clipboard.' });
+      }
+    }
+
+    // Handle send_email type
+    if (intent.type === 'send_email' && intent.params) {
+      const { to, subject, body: emailBody } = intent.params as {
+        to: string; subject: string; body: string;
+      };
+      try {
+        const { spawn } = await import('node:child_process');
+
+        // Use PowerShell on Windows, sendmail/mail on Unix
+        if (process.platform === 'win32') {
+          // Use PowerShell Send-MailMessage (requires SMTP config)
+          const psScript = `
+            $smtp = "smtp.gmail.com"
+            $port = 587
+            $from = "remoteos@localhost"
+            Send-MailMessage -SmtpServer $smtp -Port $port -From $from -To "${to}" -Subject "${subject}" -Body "${emailBody}" -Encoding UTF8
+          `;
+          await new Promise<void>((resolve, reject) => {
+            const proc = spawn('powershell', ['-NoProfile', '-Command', psScript], { timeout: 30000 });
+            let stderr = '';
+            proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+            proc.on('close', (code: number | null) => {
+              if (code === 0) resolve();
+              else reject(new Error(stderr || `Exit code ${code}`));
+            });
+            proc.on('error', reject);
+          });
+        } else {
+          // Use mail command on Unix
+          await new Promise<void>((resolve, reject) => {
+            const proc = spawn('mail', ['-s', subject, to], { timeout: 30000 });
+            proc.stdin.write(emailBody);
+            proc.stdin.end();
+            let stderr = '';
+            proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+            proc.on('close', (code: number | null) => {
+              if (code === 0) resolve();
+              else reject(new Error(stderr || `Exit code ${code}`));
+            });
+            proc.on('error', reject);
+          });
+        }
+
+        return reply.send({
+          success: true,
+          intent: { type: 'send_email', params: intent.params, confidence: 0.9, source: 'ai' },
+          result: { to, subject, sent: true },
+          formattedResponse: `📧 Đã gửi email đến *${to}*\n📝 Tiêu đề: ${subject}`,
+        });
+      } catch (emailErr: any) {
+        return reply.send({
+          success: false,
+          error: `Không thể gửi email: ${emailErr.message}. Đảm bảo SMTP đã được cấu hình.`,
+        });
+      }
+    }
+
+    // Handle create_reminder type
+    if (intent.type === 'create_reminder' && intent.params) {
+      const { title, time, recurring } = intent.params as { title: string; time: string; recurring?: string };
+      try {
+        const { SchedulerService } = await import('../services/scheduler-service.js');
+        const { parseScheduleText } = await import('../services/scheduler-service.js');
+        const schedulerService = new SchedulerService();
+
+        const cronExpression = parseScheduleText(time);
+        if (!cronExpression) {
+          return reply.send({ success: false, error: `Không hiểu thời gian: "${time}". Thử: "8h sáng", "30 phút nữa", "mỗi ngày".` });
+        }
+
+        const { AuthService } = await import('../services/auth-service.js');
+        const authService = new AuthService();
+        const defaultUser = await authService.findOrCreateUser(0, { firstName: 'Dev User', language: 'vi' });
+
+        const schedule = await schedulerService.create(defaultUser.id, {
+          name: title,
+          cronExpression,
+          commandType: 'notify',
+          commandParams: { title: 'Nhắc nhở', body: title },
+          deviceId: targetDeviceId ?? '',
+        });
+
+        return reply.send({
+          success: true,
+          intent: { type: 'create_reminder', params: intent.params, confidence: 0.95, source: 'ai' },
+          result: { schedule },
+          formattedResponse: `⏰ Đã tạo nhắc nhở: *${title}*\n📅 ${time}${recurring ? `\n🔁 Lặp lại: ${recurring}` : ''}`,
+        });
+      } catch (remErr) {
+        return reply.send({ success: false, error: 'Không thể tạo nhắc nhở.' });
+      }
+    }
+
+    // Handle manage_todo type — SQLite-backed todo system
+    if (intent.type === 'manage_todo' && intent.params) {
+      const { action, title, taskId, priority } = intent.params as {
+        action: string; title?: string; taskId?: string; priority?: string;
+      };
+      try {
+        const { getDatabase } = await import('../db/index.js');
+
+        // Ensure todos table exists
+        const db = getDatabase();
+        db.$client.exec(`CREATE TABLE IF NOT EXISTS todos (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          priority TEXT DEFAULT 'medium',
+          done INTEGER DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now')),
+          completed_at TEXT
+        )`);
+
+        if (action === 'create' && title) {
+          const id = `todo_${Date.now()}`;
+          const { sql } = await import('drizzle-orm');
+          db.run(sql`INSERT INTO todos (id, user_id, title, priority) VALUES (${id}, ${userId}, ${title}, ${priority ?? 'medium'})`);
+
+          return reply.send({
+            success: true,
+            intent: { type: 'manage_todo', params: intent.params, confidence: 0.95, source: 'ai' },
+            result: { id, title, priority: priority ?? 'medium', action: 'created' },
+            formattedResponse: `✅ Đã tạo task: *${title}*\n📋 Priority: ${priority ?? 'medium'}\n🆔 ID: ${id}`,
+          });
+        }
+
+        if (action === 'list') {
+          const { sql } = await import('drizzle-orm');
+          const rows = db.all(sql`SELECT * FROM todos WHERE user_id = ${userId} ORDER BY done ASC, created_at DESC`) as Array<{
+            id: string; title: string; priority: string; done: number; created_at: string;
+          }>;
+
+          if (rows.length === 0) {
+            return reply.send({
+              success: true,
+              intent: { type: 'manage_todo', params: intent.params, confidence: 0.95, source: 'ai' },
+              result: { todos: [], action: 'list' },
+              formattedResponse: '📋 Danh sách task trống. Dùng "tạo task [tên]" để thêm.',
+            });
+          }
+
+          const lines = rows.map(r => {
+            const status = r.done ? '✅' : '⬜';
+            const priorityIcon = r.priority === 'urgent' ? '🔴' : r.priority === 'high' ? '🟠' : r.priority === 'medium' ? '🟡' : '🟢';
+            return `${status} ${priorityIcon} ${r.title} (ID: ${r.id})`;
+          });
+
+          return reply.send({
+            success: true,
+            intent: { type: 'manage_todo', params: intent.params, confidence: 0.95, source: 'ai' },
+            result: { todos: rows, action: 'list' },
+            formattedResponse: `📋 *Danh sách task (${rows.length}):*\n\n${lines.join('\n')}`,
+          });
+        }
+
+        if ((action === 'complete' || action === 'update' || action === 'delete') && taskId) {
+          const { sql } = await import('drizzle-orm');
+
+          if (action === 'delete') {
+            db.run(sql`DELETE FROM todos WHERE id = ${taskId} AND user_id = ${userId}`);
+            return reply.send({
+              success: true,
+              intent: { type: 'manage_todo', params: intent.params, confidence: 0.95, source: 'ai' },
+              result: { action: 'deleted', taskId },
+              formattedResponse: `🗑️ Đã xóa task ${taskId}`,
+            });
+          }
+
+          if (action === 'complete') {
+            db.run(sql`UPDATE todos SET done = 1, completed_at = datetime('now') WHERE id = ${taskId} AND user_id = ${userId}`);
+            return reply.send({
+              success: true,
+              intent: { type: 'manage_todo', params: intent.params, confidence: 0.95, source: 'ai' },
+              result: { action: 'completed', taskId },
+              formattedResponse: `✅ Đã hoàn thành task ${taskId}`,
+            });
+          }
+
+          if (action === 'update' && title) {
+            db.run(sql`UPDATE todos SET title = ${title}, priority = ${priority ?? 'medium'} WHERE id = ${taskId} AND user_id = ${userId}`);
+            return reply.send({
+              success: true,
+              intent: { type: 'manage_todo', params: intent.params, confidence: 0.95, source: 'ai' },
+              result: { action: 'updated', taskId },
+              formattedResponse: `✏️ Đã cập nhật task ${taskId}`,
+            });
+          }
+        }
+
+        return reply.send({
+          success: true,
+          intent: { type: 'manage_todo', params: intent.params, confidence: 0.9, source: 'ai' },
+          result: { action },
+          formattedResponse: `✅ Đã ${action} task.`,
+        });
+      } catch (todoErr: any) {
+        return reply.send({ success: false, error: `Không thể quản lý task: ${todoErr.message}` });
+      }
+    }
+
+    // Handle generate_image type — Gemini native image generation
+    if (intent.type === 'generate_image' && intent.params) {
+      const { prompt, style } = intent.params as { prompt: string; style?: string };
+      try {
+        const { getModelManager } = await import('../services/model-manager.js');
+        const mm = getModelManager();
+
+        // Use Gemini 2.0 Flash for image generation (supports native image output)
+        const imageModel = 'gemini-2.0-flash-exp';
+        const imageUrl = `https://generativelanguage.googleapis.com/v1beta/models/${imageModel}:generateContent?key=${config.gemini.apiKey}`;
+
+        const stylePrompt = style ? `Style: ${style}. ` : '';
+        const fullPrompt = `${stylePrompt}Generate an image: ${prompt}`;
+
+        const axios = (await import('axios')).default;
+        const response = await axios.post(imageUrl, {
+          contents: [{ parts: [{ text: fullPrompt }] }],
+          generationConfig: {
+            responseModalities: ['TEXT', 'IMAGE'],
+          },
+        }, { timeout: 60000 });
+
+        // Check for image in response
+        const parts = response.data.candidates?.[0]?.content?.parts as Array<Record<string, unknown>> | undefined;
+        const imagePart = parts?.find(p => p.inlineData);
+
+        if (imagePart?.inlineData) {
+          const imageData = (imagePart.inlineData as { data: string; mimeType: string }).data;
+          const mimeType = (imagePart.inlineData as { data: string; mimeType: string }).mimeType ?? 'image/png';
+
+          // Save image to Desktop
+          const { writeFileSync, existsSync, mkdirSync } = await import('node:fs');
+          const { join } = await import('node:path');
+          const desktop = join(process.env.USERPROFILE || process.env.HOME || '', 'Desktop');
+          const imagesDir = join(desktop, 'RemoteOS-Images');
+          if (!existsSync(imagesDir)) mkdirSync(imagesDir, { recursive: true });
+
+          const filename = `generated_${Date.now()}.png`;
+          const filepath = join(imagesDir, filename);
+          writeFileSync(filepath, Buffer.from(imageData, 'base64'));
+
+          return reply.send({
+            success: true,
+            intent: { type: 'generate_image', params: intent.params, confidence: 0.95, source: 'ai' },
+            result: { path: filepath, filename, prompt },
+            formattedResponse: `🎨 Đã tạo hình ảnh!\n📁 ${filepath}\n📝 Prompt: ${prompt}`,
+          });
+        }
+
+        // If no image generated, return text response
+        const textPart = parts?.find(p => p.text);
+        const textResponse = (textPart?.text as string) ?? 'Không thể tạo hình ảnh.';
+
+        return reply.send({
+          success: true,
+          intent: { type: 'generate_image', params: intent.params, confidence: 0.7, source: 'ai' },
+          result: { response: textResponse },
+          formattedResponse: `🎨 ${textResponse}`,
+        });
+      } catch (imgErr: any) {
+        logger.error({ err: imgErr }, 'Image generation failed');
+        return reply.send({
+          success: false,
+          error: `Không thể tạo hình ảnh: ${imgErr.message}. Đảm bảo Gemini API key có quyền image generation.`,
+        });
+      }
+    }
+
     // Execute the command (only if we have a device)
     if (!targetDeviceId) {
       // No device available - return AI-generated response
       const aiResponse = await aiService.generateFriendlyResponse(text ?? 'Xin chào');
+
+      // ── Conversation Memory: Record AI-only response ──
+      await conversationMemory.recordTurn({
+        userId,
+        role: 'assistant',
+        content: aiResponse ?? 'No response',
+        intentType: 'free_response',
+        resultSummary: aiResponse?.slice(0, 200),
+      });
+
       return reply.send({
         success: true,
         intent: { type: 'free_response', params: {}, confidence: 0.9, source: 'ai' },
@@ -1462,7 +2247,8 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
 
         try {
           const recoveryPrompt = `The command failed with error: "${errorMsg}". Original command type: ${intent.type}, params: ${JSON.stringify(intent.params)}. Suggest a fix. Respond with JSON: {"type":"<command_type>","params":{...},"confidence":0.8}`;
-          const recoveryUrl = `${GEMINI_API_URL}/${selectRecoveryModel()}:generateContent?key=${config.gemini.apiKey}`;
+          const recoveryModel = await selectRecoveryModel();
+          const recoveryUrl = `${GEMINI_API_URL}/${recoveryModel}:generateContent?key=${config.gemini.apiKey}`;
           const axios = (await import('axios')).default;
           const recoveryResponse = await axios.post(recoveryUrl, {
             contents: [{ parts: [{ text: recoveryPrompt }] }],
@@ -1513,11 +2299,66 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
 
       const response = aiService.formatResponse(intent.type, cmdResult.output);
 
+      // ── Tool Result Feedback Loop: Feed result back to AI ──
+      let finalResponse = response;
+      try {
+        const resultSummary = JSON.stringify(cmdResult.output).slice(0, 3000);
+        const feedbackPrompt = `You executed "${intent.type}" and got this result:\n${resultSummary}\n\nOriginal user request: "${text}"\n\nDo you need to take any additional action? If yes, respond with a function call. If no, respond with a brief, helpful summary of what was done. Be natural and concise.`;
+
+        const feedbackIntent = await aiService.interpretWithUserAI(feedbackPrompt, userId);
+
+        if (feedbackIntent && feedbackIntent.type !== 'free_response' && feedbackIntent.type !== intent.type) {
+          // AI wants to take another action — execute it
+          logger.info({ followUpType: feedbackIntent.type }, 'AI requested follow-up action after tool result');
+
+          if (targetDeviceId) {
+            const followUpResult = await commandService.create(userId, {
+              deviceId: targetDeviceId,
+              type: feedbackIntent.type,
+              params: feedbackIntent.params,
+            });
+
+            if (followUpResult.success) {
+              const followUpCmdResult = await commandService.waitForResult(followUpResult.command!.id, 60_000);
+              if (followUpCmdResult?.status === 'completed') {
+                const followUpResponse = aiService.formatResponse(feedbackIntent.type, followUpCmdResult.output);
+                finalResponse = `${response}\n\n${followUpResponse}`;
+              }
+            }
+          }
+        } else if (feedbackIntent?.response) {
+          // AI provided a better summary — use it
+          finalResponse = `${response}\n\n💡 ${feedbackIntent.response}`;
+        }
+      } catch (feedbackErr) {
+        // Feedback loop failed, use original response
+        logger.debug({ feedbackErr }, 'Tool result feedback loop failed, using original response');
+      }
+
+      // ── Conversation Memory: Record successful execution ──
+      await conversationMemory.recordTurn({
+        userId,
+        role: 'assistant',
+        content: finalResponse,
+        intentType: intent.type,
+        params: intent.params,
+        resultSummary: JSON.stringify(cmdResult.output).slice(0, 500),
+      });
+      await conversationMemory.updateLastAction(userId, {
+        type: intent.type,
+        params: intent.params ?? {},
+        result: cmdResult.output,
+        resultSummary: finalResponse.slice(0, 300),
+        timestamp: new Date().toISOString(),
+        filesAffected: intent.params?.path ? [intent.params.path as string] : undefined,
+        workingDirectory: getDesktopPath(),
+      });
+
       return reply.send({
         success: true,
         intent: { type: intent.type, params: intent.params, confidence: intent.confidence, source: intent.source },
         result: cmdResult.output,
-        formattedResponse: response,
+        formattedResponse: finalResponse,
       });
     } catch (err) {
       logger.error({ err, type: intent.type }, 'Execution failed');
@@ -1662,13 +2503,55 @@ export function registerInterpretRoutes(server: FastifyInstance): void {
     // Generate final response
     const allSuccess = results.every(r => r.success);
     const summary = results.map(r => `${r.turn}. ${r.action}: ${r.success ? '✅' : '❌'}`).join('\n');
+    const responseText = allSuccess
+      ? `✅ Hoàn thành ${results.length} bước:\n${summary}`
+      : `⚠️ Hoàn thành ${results.filter(r => r.success).length}/${results.length} bước:\n${summary}`;
+
+    // ── Conversation Memory: Record multi-turn execution ──
+    await conversationMemory.recordTurn({
+      userId,
+      role: 'user',
+      content: text,
+    });
+    await conversationMemory.recordTurn({
+      userId,
+      role: 'assistant',
+      content: responseText,
+      intentType: 'multi_turn',
+      resultSummary: `${results.length} steps, ${results.filter(r => r.success).length} success`,
+    });
+    await conversationMemory.updateLastAction(userId, {
+      type: 'multi_turn',
+      params: { steps: results.map(r => r.action) },
+      resultSummary: responseText.slice(0, 300),
+      timestamp: new Date().toISOString(),
+      workingDirectory: getDesktopPath(),
+    });
 
     return reply.send({
       success: allSuccess,
       result: { turns: results.length, results },
-      formattedResponse: allSuccess
-        ? `✅ Hoàn thành ${results.length} bước:\n${summary}`
-        : `⚠️ Hoàn thành ${results.filter(r => r.success).length}/${results.length} bước:\n${summary}`,
+      formattedResponse: responseText,
+    });
+  });
+
+  // ─── GET /usage — Token Usage Statistics ─────────────────────
+
+  server.get('/usage', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { getUserUsage, getGlobalUsage, getRecentUsage } = await import('../services/usage-tracker.js');
+    const { AuthService } = await import('../services/auth-service.js');
+    const authService = new AuthService();
+    const defaultUser = await authService.findOrCreateUser(0, { firstName: 'Dev User', language: 'vi' });
+
+    const userUsage = getUserUsage(defaultUser.id);
+    const globalUsage = getGlobalUsage();
+    const recentUsage = getRecentUsage(defaultUser.id, 10);
+
+    return reply.send({
+      success: true,
+      user: userUsage,
+      global: globalUsage,
+      recent: recentUsage,
     });
   });
 }

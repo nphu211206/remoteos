@@ -116,8 +116,8 @@ export function detectEmotion(text: string): EmotionAnalysis {
     }
   }
 
-  // Check for caps (shouting)
-  const capsRatio = (text.match(/[A-Z]/g) || []).length / text.length;
+  // Check for caps (shouting) — include Vietnamese uppercase characters
+  const capsRatio = (text.match(/[A-ZÀ-Ỹ]/g) || []).length / text.length;
   if (capsRatio > 0.7 && text.length > 10) {
     scores.angry += 2;
     indicators.push('angry: high caps ratio');

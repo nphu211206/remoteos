@@ -111,7 +111,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
     if (args === 'test') {
       await ctx.reply('🧪 Đang test kết nối AI...');
       try {
-        const response = await fetch('config.server.url/api/v1/interpret', {
+        const response = await fetch(`${config.server.url}/api/v1/interpret`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: 'hello' }),
@@ -132,7 +132,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
     // /ai reset — Reset to default
     if (args === 'reset') {
       try {
-        await fetch(`config.server.url/api/v1/users/${userId}/ai-config`, {
+        await fetch(`${config.server.url}/api/v1/users/${userId}/ai-config`, {
           method: 'DELETE',
         });
         await ctx.reply('🔄 Đã xóa cấu hình AI. Sử dụng Gemini default.');
@@ -200,7 +200,7 @@ export function registerAISettings(bot: Bot<BotContext>): void {
 
       // Save to server
       try {
-        const response = await fetch(`config.server.url/api/v1/users/${userId}/ai-config`, {
+        const response = await fetch(`${config.server.url}/api/v1/users/${userId}/ai-config`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ provider, apiKey, model }),

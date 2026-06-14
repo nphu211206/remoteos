@@ -61,8 +61,11 @@ else
     echo "   Agent: FAILED (will retry)"
 fi
 
-# Clear Telegram updates
-curl -s "https://api.telegram.org/bot8922298612:AAFV4W0ebDJSk-J1xIsC9EL0j6ZREQHKJfk/getUpdates?offset=-1" > /dev/null 2>&1
+# Clear Telegram updates (reads token from .env)
+source ../../.env 2>/dev/null || true
+if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=-1" > /dev/null 2>&1
+fi
 
 # Start bot
 echo "[6/6] Starting bot..."

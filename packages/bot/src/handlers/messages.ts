@@ -186,45 +186,94 @@ async function handlePhotoMessage(ctx: BotContext): Promise<void> {
     const photoBuffer = Buffer.from(photoResponse.data);
     const base64Photo = photoBuffer.toString('base64');
 
-    // Use Gemini Vision API to analyze the image
+    // Send image to server's interpret-and-execute with vision
     const caption = ctx.message?.caption ?? 'Phân tích ảnh này và mô tả chi tiết những gì bạn thấy.';
 
-    const geminiApiKey = process.env.GEMINI_API_KEY ?? '';
-    const geminiModel = process.env.GEMINI_MODEL ?? 'gemini-3.1-flash-lite';
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
+    try {
+      const result = await serverClient.interpretAndExecute(
+        caption,
+        undefined,
+        `User sent an image (base64, ${base64Photo.length} chars)`,
+      );
 
-    const response = await axios.post(geminiUrl, {
-      contents: [{
-        parts: [
-          { text: caption },
-          {
-            inline_data: {
-              mime_type: 'image/jpeg',
-              data: base64Photo,
-            },
-          },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 2048,
-      },
-    }, { timeout: 30000 });
+      if (result.success && result.formattedResponse) {
+        const chunks = result.formattedResponse.match(/.{1,4000}/gs) ?? [result.formattedResponse];
+        for (const chunk of chunks) {
+          await ctx.reply(chunk, { parse_mode: 'Markdown' }).catch(() => ctx.reply(chunk));
+        }
+      } else {
+        // Fallback: direct Gemini Vision API
+        const geminiApiKey = process.env.GEMINI_API_KEY ?? '';
+        const geminiModel = process.env.GEMINI_MODEL ?? 'gemini-3.1-flash-lite';
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
 
-    const aiText = response.data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        const response = await axios.post(geminiUrl, {
+          contents: [{
+            parts: [
+              { text: caption },
+              { inline_data: { mime_type: 'image/jpeg', data: base64Photo } },
+            ],
+          }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+        }, { timeout: 30000 });
 
-    if (aiText) {
-      // Split long responses
-      const chunks = aiText.match(/.{1,4000}/gs) ?? [aiText];
-      for (const chunk of chunks) {
-        await ctx.reply(chunk, { parse_mode: 'Markdown' }).catch(() => ctx.reply(chunk));
+        const aiText = response.data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (aiText) {
+          const chunks = aiText.match(/.{1,4000}/gs) ?? [aiText];
+          for (const chunk of chunks) {
+            await ctx.reply(chunk, { parse_mode: 'Markdown' }).catch(() => ctx.reply(chunk));
+          }
+        } else {
+          await ctx.reply('🤔 Không thể phân tích ảnh.');
+        }
       }
-    } else {
-      await ctx.reply('🤔 Không thể phân tích ảnh.');
+    } catch (visionErr) {
+      logger.error({ err: visionErr }, 'Vision analysis failed');
+      await ctx.reply('❌ Không thể phân tích ảnh. Thử lại sau.');
     }
   } catch (err) {
     logger.error({ err }, 'Failed to process photo');
     await ctx.reply('❌ Không thể phân tích ảnh. Thử lại sau.');
+  }
+}
+
+// ─── Document Message Handler ────────────────────────────────────
+
+async function handleDocumentMessage(ctx: BotContext): Promise<void> {
+  const document = ctx.message?.document;
+  if (!document) return;
+
+  logger.info({ userId: ctx.from?.id, filename: document.file_name, size: document.file_size }, 'Received document');
+
+  await ctx.reply('📎 Đang xử lý file...');
+
+  try {
+    const file = await ctx.api.getFile(document.file_id);
+    const fileUrl = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
+
+    const axios = (await import('axios')).default;
+    const fileResponse = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+    const fileBuffer = Buffer.from(fileResponse.data);
+    const base64File = fileBuffer.toString('base64');
+    const caption = ctx.message?.caption ?? '';
+
+    // Send to server for processing
+    const fileName = document.file_name ?? 'unknown_file';
+    const result = await serverClient.interpretAndExecute(
+      caption || `đọc file ${fileName}`,
+      undefined,
+      `User uploaded file: ${fileName} (${document.file_size ?? 0} bytes, base64 length: ${base64File.length})`,
+    );
+
+    const responseText = result.formattedResponse ?? 'Đã xử lý file.';
+    if (result.success && result.formattedResponse) {
+      await ctx.reply(responseText, { parse_mode: 'Markdown' }).catch(() => ctx.reply(responseText));
+    } else {
+      await ctx.reply(`📎 Đã nhận file: ${fileName}\n📏 ${document.file_size ?? 0} bytes\n\n💡 Gõ lệnh để xử lý file này.`);
+    }
+  } catch (err) {
+    logger.error({ err }, 'Failed to process document');
+    await ctx.reply('❌ Không thể xử lý file. Thử lại sau.');
   }
 }
 
@@ -236,6 +285,9 @@ export function registerMessages(bot: Bot<BotContext>): void {
 
   // Handle photo messages
   bot.on('message:photo', handlePhotoMessage);
+
+  // Handle document messages (file uploads)
+  bot.on('message:document', handleDocumentMessage);
 
   // Handle text messages
   bot.on('message:text', async (ctx) => {

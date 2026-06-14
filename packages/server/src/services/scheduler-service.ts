@@ -127,6 +127,61 @@ export function parseScheduleText(text: string): string | null {
     return `0 ${specificHour[1]} * * *`;
   }
 
+  // English: "every day at 8am" / "daily at 9:30"
+  const dailyAt = lower.match(/(?:every\s+day|daily)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (dailyAt) {
+    let hour = parseInt(dailyAt[1]);
+    const min = dailyAt[2] ? parseInt(dailyAt[2]) : 0;
+    if (dailyAt[3] === 'pm' && hour < 12) hour += 12;
+    if (dailyAt[3] === 'am' && hour === 12) hour = 0;
+    return `${min} ${hour} * * *`;
+  }
+
+  // English: "at 8am" / "at 9:30pm"
+  const atTime = lower.match(/(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+  if (atTime) {
+    let hour = parseInt(atTime[1]);
+    const min = atTime[2] ? parseInt(atTime[2]) : 0;
+    if (atTime[3] === 'pm' && hour < 12) hour += 12;
+    if (atTime[3] === 'am' && hour === 12) hour = 0;
+    return `${min} ${hour} * * *`;
+  }
+
+  // English: "every tuesday" / "every wednesday"
+  const dayMap: Record<string, number> = {
+    sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
+    thursday: 4, friday: 5, saturday: 6,
+  };
+  for (const [day, num] of Object.entries(dayMap)) {
+    if (lower.includes(`every ${day}`)) return `0 9 * * ${num}`;
+  }
+
+  // English: "weekdays" / "every weekday"
+  if (/weekdays|every weekday/i.test(lower)) return '0 9 * * 1-5';
+
+  // English: "weekends" / "every weekend"
+  if (/weekends|every weekend/i.test(lower)) return '0 10 * * 0,6';
+
+  // English: "every N minutes"
+  const enEveryMin = lower.match(/every\s+(\d+)\s*min/);
+  if (enEveryMin) return `*/${enEveryMin[1]} * * * *`;
+
+  // English: "every N hours"
+  const enEveryHour = lower.match(/every\s+(\d+)\s*hours?/);
+  if (enEveryHour) return `0 */${enEveryHour[1]} * * *`;
+
+  // English: "hourly"
+  if (/hourly/i.test(lower)) return '0 * * * *';
+
+  // English: "daily"
+  if (/daily/i.test(lower)) return '0 9 * * *';
+
+  // English: "weekly"
+  if (/weekly/i.test(lower)) return '0 9 * * 1';
+
+  // English: "monthly"
+  if (/monthly/i.test(lower)) return '0 0 1 * *';
+
   return null;
 }
 

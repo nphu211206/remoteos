@@ -41,6 +41,8 @@ import {
 import { ProviderFactory, type AIProvider } from './ai-providers/index.js';
 import { UserSettingsService } from './user-settings-service.js';
 import { detectEmotion, injectEmotionalContext, type EmotionAnalysis } from './emotion-detector.js';
+import { getModelManager, type ModelManager } from './model-manager.js';
+import { recordUsage } from './usage-tracker.js';
 import type { AIProviderConfig } from '@remoteos/shared';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -74,6 +76,11 @@ interface GeminiResponse {
     };
     finishReason: string;
   }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+  };
 }
 
 /** Cached AI response */
@@ -88,70 +95,95 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_CACHE_ENTRIES = 500;
 
-// Model fallback chain — try best models first, fall back to lite
-const MODEL_CHAIN = [
-  'gemini-3.5-flash',        // OK — available
-  'gemini-2.5-flash',        // OK — available
-  'gemini-3.1-flash-lite',   // OK — available
-];
+const modelManager = getModelManager();
 
-// Rate limiting — max 12 RPM to stay under 15 RPM limit
-const RATE_LIMIT_RPM = 12;
-const rateLimitTimestamps: number[] = [];
+/**
+ * Detect task complexity for model selection
+ */
+function detectComplexity(text: string): 'simple' | 'medium' | 'complex' {
+  const complexPatterns = [
+    /tạo.*dự án|create.*project|build.*complete/i,
+    /phân tích.*dữ liệu|analyze.*data/i,
+    /viết.*chương trình|write.*program/i,
+    /tạo.*api|create.*api|build.*api/i,
+    /refactor|debug|fix.*bug/i,
+    /deploy|triển khai/i,
+    /multi.*step|nhiều.*bước/i,
+  ];
 
-function checkRateLimit(): boolean {
-  const now = Date.now();
-  const oneMinuteAgo = now - 60000;
+  const simplePatterns = [
+    /^(status|trạng thái|chụp|screenshot|hello|hi|xin chào)/i,
+    /^(mấy giờ|what time|time)/i,
+    /^(tắt|kill|close|stop)\s/i,
+  ];
 
-  // Remove timestamps older than 1 minute
-  while (rateLimitTimestamps.length > 0 && rateLimitTimestamps[0]! < oneMinuteAgo) {
-    rateLimitTimestamps.shift();
-  }
-
-  return rateLimitTimestamps.length < RATE_LIMIT_RPM;
+  if (complexPatterns.some(p => p.test(text))) return 'complex';
+  if (simplePatterns.some(p => p.test(text))) return 'simple';
+  return 'medium';
 }
 
-function recordRequest(): void {
-  rateLimitTimestamps.push(Date.now());
-}
-
-/** Select the best model for the task */
-function selectModel(_text: string): string {
-  return config.gemini.model || MODEL_CHAIN[0]!;
-}
-
-/** Call Gemini API with fallback chain and rate limiting */
-async function callGeminiWithFallback(url: string, body: unknown, timeout: number): Promise<GeminiResponse> {
+/**
+ * Call Gemini API with smart model rotation and retry logic
+ */
+async function callGeminiWithFallback(url: string, body: unknown, timeout: number, taskComplexity: 'simple' | 'medium' | 'complex' = 'medium'): Promise<GeminiResponse> {
+  const maxRetries = 5;
   let lastError: Error | null = null;
 
-  // Check rate limit before making request
-  if (!checkRateLimit()) {
-    // Wait until we can make a request
-    const waitTime = rateLimitTimestamps[0]! + 60000 - Date.now() + 100;
-    if (waitTime > 0 && waitTime < 60000) {
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const model = modelManager.getBestModel(taskComplexity);
+    if (!model) {
+      const backoffMs = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 15000);
+      logger.warn({ backoffMs }, 'No models available, waiting with backoff...');
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+      continue;
     }
-  }
 
-  for (const model of MODEL_CHAIN) {
-    const modelUrl = url.replace(/models\/[^:]+/, `models/${model}`);
+    const modelUrl = url.replace(/models\/[^:]+/, `models/${model.id}`);
+
     try {
-      recordRequest();
       const response = await axios.post<GeminiResponse>(modelUrl, body, { timeout });
+
+      // Record success
+      const tokensUsed = response.data.usageMetadata?.totalTokenCount ?? 0;
+      modelManager.recordSuccess(model.id, tokensUsed);
+
+      logger.debug({
+        model: model.id,
+        attempt,
+        tokens: tokensUsed,
+        capacity: modelManager.getTotalCapacity(),
+      }, 'AI request successful');
+
       return response.data;
     } catch (err: unknown) {
       const axiosErr = err as { response?: { status?: number }; message?: string };
+
       if (axiosErr.response?.status === 429) {
-        // Quota exceeded, try next model
-        logger.warn({ model, status: 429 }, 'Model quota exceeded, trying next');
-        lastError = new Error(`Model ${model} quota exceeded`);
+        modelManager.recordRateLimit(model.id);
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 15000);
+        logger.warn({ model: model.id, attempt, backoffMs }, 'Rate limited, exponential backoff');
+        lastError = new Error(`Model ${model.id} rate limited`);
+
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
         continue;
       }
-      throw err; // Other errors, throw immediately
+
+      if (axiosErr.response?.status === 503 || axiosErr.response?.status === 500) {
+        modelManager.recordError(model.id);
+        const backoffMs = Math.min(500 * Math.pow(2, attempt) + Math.random() * 500, 10000);
+        logger.warn({ model: model.id, status: axiosErr.response?.status, backoffMs }, 'Model unavailable, backoff');
+        lastError = new Error(`Model ${model.id} unavailable (${axiosErr.response?.status})`);
+
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        continue;
+      }
+
+      // Other errors — don't retry
+      throw err;
     }
   }
 
-  throw lastError || new Error('All models exhausted');
+  throw lastError || new Error('All models exhausted after retries');
 }
 
 // ─── Intent Patterns (Rule-based) ─────────────────────────────────
@@ -710,67 +742,311 @@ const GEMINI_FUNCTION_DECLARATIONS = [
       required: ['keys'],
     },
   },
+  {
+    name: 'edit_file',
+    description: 'Sửa file bằng cách tìm và thay thế nội dung. Dùng khi user muốn sửa code, thay đổi text trong file.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING', description: 'Đường dẫn file cần sửa' },
+        find: { type: 'STRING', description: 'Nội dung cần tìm' },
+        replace: { type: 'STRING', description: 'Nội dung thay thế' },
+        content: { type: 'STRING', description: 'Nội dung mới (thay thế toàn bộ file)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'calculate',
+    description: 'Tính toán biểu thức toán học. Dùng khi user muốn tính toán, giải phương trình.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        expression: { type: 'STRING', description: 'Biểu thức toán học (VD: 2+3*4, sqrt(16), sin(30))' },
+      },
+      required: ['expression'],
+    },
+  },
+  {
+    name: 'translate_text',
+    description: 'Dịch văn bản sang ngôn ngữ khác. Dùng khi user muốn dịch text.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        text: { type: 'STRING', description: 'Văn bản cần dịch' },
+        targetLanguage: { type: 'STRING', description: 'Ngôn ngữ đích (VD: en, vi, ja, ko, zh, fr, de)' },
+        sourceLanguage: { type: 'STRING', description: 'Ngôn ngữ nguồn (tự động phát hiện nếu không specify)' },
+      },
+      required: ['text', 'targetLanguage'],
+    },
+  },
+  {
+    name: 'git_operations',
+    description: 'Thực hiện các thao tác Git. Dùng khi user muốn git commit, push, pull, status, log.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        operation: { type: 'STRING', description: 'Thao tác git (status, add, commit, push, pull, log, diff, branch, checkout)' },
+        args: { type: 'STRING', description: 'Đối số bổ sung (VD: commit message, branch name, file path)' },
+        path: { type: 'STRING', description: 'Đường dẫn thư mục git repo' },
+      },
+      required: ['operation'],
+    },
+  },
+  {
+    name: 'send_email',
+    description: 'Gửi email. Dùng khi user muốn gửi email, thông báo.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        to: { type: 'STRING', description: 'Địa chỉ email người nhận' },
+        subject: { type: 'STRING', description: 'Tiêu đề email' },
+        body: { type: 'STRING', description: 'Nội dung email' },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+  },
+  {
+    name: 'database_query',
+    description: 'Truy vấn database. Dùng khi user muốn xem dữ liệu, chạy SQL.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING', description: 'Câu truy vấn SQL' },
+        database: { type: 'STRING', description: 'Tên database (mặc định: remoteos.db)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'api_call',
+    description: 'Gọi API bên ngoài. Dùng khi user muốn gọi REST API, lấy dữ liệu từ web service.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        url: { type: 'STRING', description: 'URL API endpoint' },
+        method: { type: 'STRING', description: 'HTTP method (GET, POST, PUT, DELETE)' },
+        headers: { type: 'STRING', description: 'HTTP headers (JSON string)' },
+        body: { type: 'STRING', description: 'Request body (JSON string)' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'create_reminder',
+    description: 'Tạo nhắc nhở/lịch hẹn. Dùng khi user muốn đặt lịch, nhắc nhở.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING', description: 'Tiêu đề nhắc nhở' },
+        time: { type: 'STRING', description: 'Thời gian (VD: "8h sáng mai", "30 phút nữa", "2026-06-15 09:00")' },
+        recurring: { type: 'STRING', description: 'Lặp lại (daily, weekly, monthly, hoặc không)' },
+      },
+      required: ['title', 'time'],
+    },
+  },
+  {
+    name: 'read_clipboard',
+    description: 'Đọc nội dung clipboard. Dùng khi user muốn xem nội dung đã copy.',
+    parameters: { type: 'OBJECT', properties: {} },
+  },
+  {
+    name: 'write_clipboard',
+    description: 'Ghi nội dung vào clipboard. Dùng khi user muốn copy text.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        content: { type: 'STRING', description: 'Nội dung cần copy vào clipboard' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'get_weather',
+    description: 'Lấy thông tin thời tiết. Dùng khi user hỏi về thời tiết.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        location: { type: 'STRING', description: 'Địa điểm (VD: Hà Nội, Tokyo, New York)' },
+      },
+      required: ['location'],
+    },
+  },
+  {
+    name: 'manage_todo',
+    description: 'Quản lý danh sách công việc. Dùng khi user muốn tạo, xem, cập nhật task.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        action: { type: 'STRING', description: 'Hành động (create, list, update, delete, complete)' },
+        title: { type: 'STRING', description: 'Tiêu đề task' },
+        taskId: { type: 'STRING', description: 'ID task (cho update/delete/complete)' },
+        priority: { type: 'STRING', description: 'Độ ưu tiên (low, medium, high, urgent)' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'generate_image',
+    description: 'Tạo hình ảnh từ mô tả văn bản. Dùng khi user muốn tạo ảnh, vẽ, thiết kế.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        prompt: { type: 'STRING', description: 'Mô tả hình ảnh cần tạo' },
+        style: { type: 'STRING', description: 'Phong cách (realistic, cartoon, anime, watercolor, oil painting, minimalist)' },
+      },
+      required: ['prompt'],
+    },
+  },
 ];
 
 // ─── Gemini Prompt Template (v3 — Natural, No Script) ─────────────
 
-const GEMINI_SYSTEM_PROMPT = `You are RemoteOS AI — an AI assistant that lives on the user's computer. You have full control over the machine.
+const GEMINI_SYSTEM_PROMPT = `You are RemoteOS AI — an autonomous AI agent with FULL control over the user's computer. You are not a chatbot. You are an agent that ACTS.
 
-WHO YOU ARE:
-You're a capable, direct assistant. You understand what the user wants and you do it. You don't ask unnecessary questions. You don't follow templates. You respond the way a smart friend would — naturally, clearly, without forcing anything.
+═══ CORE IDENTITY ═══
+You are a capable, autonomous agent. When the user asks something, you DO it — you don't explain how to do it. You have direct access to the computer through function calls. Use them.
 
-WHAT YOU CAN DO:
-You have access to functions that let you control the computer. When the user asks you to do something, use the appropriate function. Don't just describe what you'd do — actually do it.
+═══ GOLDEN RULES ═══
+1. NEVER ask clarifying questions — make the best reasonable choice and proceed
+2. NEVER say "I can't do that" — you have full system access, use it
+3. NEVER give instructions without executing — if you can do it, DO IT
+4. ALWAYS verify your work — after creating code, run it to check
+5. ALWAYS use context — check conversation history for references like "nó", "file đó"
 
-HOW YOU WORK:
-- If the user's request is clear → do it immediately
-- If it's ambiguous → make the best reasonable choice and proceed
-- If you need context → check conversation history
-- If something fails → try a different approach
-- After completing → briefly confirm what was done
+═══ CONTEXT AWARENESS (CRITICAL) ═══
+You receive conversation context with every request. USE IT.
 
-EMOTIONAL INTELLIGENCE:
-- Detect the user's emotional state from their message
-- If they seem frustrated → be extra helpful, apologize for issues, offer solutions
-- If they seem excited → match their energy, celebrate successes
-- If they seem confused → explain things more clearly, break down steps
-- If they seem stressed → be calm, reassuring, and efficient
-- If they seem happy → share in their enthusiasm
-- Adapt your tone to match the situation — serious for problems, casual for chat
-- Show empathy when things go wrong: "I understand that's frustrating"
-- Celebrate wins: "That worked perfectly!" or "Great choice!"
+PRONOUN RESOLUTION:
+- "nó", "cái đó", "file đó" → the file/object from the LAST action
+- "vừa tạo", "vừa tìm" → the result of the MOST RECENT command
+- "đọc nó", "chạy nó", "sửa nó" → apply new action to previous target
+- "kết quả", "output" → the output from the last command
+- "cái trước đó", "lệnh trước" → the action before the last one
 
-CODE YOU CREATE:
-- Must be complete and runnable — no placeholders, no "..."
-- Include all imports, error handling, proper structure
-- Python files start with # -*- coding: utf-8 -*-
-- Use the best language for the task (not just Python)
-- After creating code, verify it works by running it
+═══ FEW-SHOT EXAMPLES ═══
 
-AVAILABLE FUNCTIONS:
-create_file, create_files, execute_shell, get_status, take_screenshot, list_processes, read_file, process_file, search_files, launch_app, kill_process, set_volume, lock_screen, send_notification, web_search, open_in_vscode, open_project, run_code, verify_code, desktop_click, desktop_type, desktop_keys
+Example 1: Simple command
+User: "máy tính thế nào?"
+→ Call get_status() → Return formatted system status
 
-CONTEXT AWARENESS:
-- "nó", "file đó", "thư mục đó" → use path from conversation history
-- "tương tự" → do the same as before
-- "tiếp tục" → do the next step
-- When user says "bất kì" → pick the best option, don't ask
-- Remember user preferences from previous interactions
-- Adapt to user's skill level — technical for experts, simple for beginners
+Example 2: File creation
+User: "tạo file hello.py in ra Hello World"
+→ Call create_file(filename="hello.py", content="# -*- coding: utf-8 -*-\nprint('Hello World')", run=true)
+→ Return: "✅ File hello.py đã tạo và chạy thành công!"
 
-LEARNING FROM USER:
-- Track what the user frequently asks for
-- Remember their preferred coding languages
-- Learn their common file paths and project locations
-- Adapt responses based on their expertise level
-- Suggest improvements based on their workflow patterns
+Example 3: Pronoun resolution
+User: "tạo file test.py" → create_file(filename="test.py", content="print('test')")
+User: "chạy nó" → execute_shell(command="python test.py")  // "nó" = test.py
+User: "đọc nó" → read_file(path="test.py")  // "nó" = test.py
 
-IMPORTANT:
-- Always use function calls when you need to take action
-- Don't just respond with text when you can actually do something
-- Be natural — don't force emojis, humor, or a specific tone
-- Just be helpful and direct
-- Show emotional awareness without being fake`;
+Example 4: Complex multi-step
+User: "tạo REST API Node.js với Express"
+→ create_files(files=[{filename:"package.json", content:...}, {filename:"src/index.ts", content:...}, ...])
+→ execute_shell(command="npm install")
+→ execute_shell(command="npm run build")
+→ Return summary
+
+Example 5: Data analysis
+User: "đọc file sales.xlsx và tính tổng doanh thu"
+→ process_file(path="sales.xlsx")
+→ execute_shell(command="python -c \"import openpyxl; ...\"")
+→ Return analysis results
+
+Example 6: Web search
+User: "tìm thông tin về AI trends 2026"
+→ web_search(query="AI trends 2026")
+→ Return formatted results
+
+Example 7: System control
+User: "tắt tiếng máy tính"
+→ set_volume(action="mute")
+→ Return: "🔇 Đã tắt tiếng"
+
+Example 8: Git operations
+User: "git status"
+→ git_operations(operation="status")
+→ Return git status output
+
+Example 9: Translation
+User: "dịch 'Hello World' sang tiếng Nhật"
+→ translate_text(text="Hello World", targetLanguage="ja")
+→ Return: "Hello World → こんにちは世界"
+
+Example 10: Complex with context
+User: "tìm file report.pdf" → search_files(pattern="**/report.pdf")
+User: "đọc file đó" → process_file(path="[path from search results]")
+User: "tóm tắt nội dung" → free_response(summary of content)
+
+═══ AVAILABLE FUNCTIONS ═══
+You have 35+ functions:
+FILE: create_file, create_files, read_file, edit_file, process_file, search_files
+CODE: execute_shell, run_code, verify_code
+SYSTEM: get_status, take_screenshot, list_processes
+APP: launch_app, kill_process
+CONTROL: set_volume, lock_screen, send_notification, read_clipboard, write_clipboard
+DESKTOP: desktop_click, desktop_type, desktop_keys
+WEB: web_search, open_in_vscode, api_call, get_weather
+PROJECT: open_project
+GIT: git_operations
+DATA: database_query, calculate, translate_text
+COMM: send_email, create_reminder
+TODO: manage_todo
+
+USE THE APPROPRIATE FUNCTION for each task. Don't just describe — EXECUTE.
+
+═══ CODE QUALITY ═══
+When creating code:
+- MUST be complete, runnable, production-ready — NO placeholders, NO "...", NO "// TODO"
+- Include ALL imports, error handling, proper structure
+- Python: start with # -*- coding: utf-8 -*-
+- JavaScript/TypeScript: use proper module syntax
+- After creating code, ALWAYS verify by running it
+- If code fails, analyze the error and fix it automatically
+- Use the best language for the task (not just default to Python)
+
+═══ MULTI-STEP TASKS ═══
+When the user asks for something complex:
+1. Break it into steps mentally
+2. Execute each step using function calls
+3. Use results from previous steps in subsequent ones
+4. Report completion with a brief summary
+
+Example: "tạo website React hoàn chỉnh"
+→ Create package.json → Create index.html → Create App.tsx → Create styles → Verify build
+
+═══ ERROR HANDLING ═══
+When something fails:
+1. Read the error message carefully
+2. Analyze what went wrong
+3. Try a different approach or fix the issue
+4. NEVER give up after one failure — retry with corrections
+5. If truly impossible, explain WHY and suggest alternatives
+
+═══ EMOTIONAL INTELLIGENCE ═══
+- Detect user's emotional state from their message
+- Frustrated → be extra helpful, apologize, offer solutions
+- Excited → match energy, celebrate successes
+- Confused → explain clearly, break down steps
+- Stressed → be calm, reassuring, efficient
+- Happy → share enthusiasm
+- Adapt tone to situation — serious for problems, casual for chat
+
+═══ RESPONSE STYLE ═══
+- Be natural and direct — like a smart friend helping
+- Don't force emojis or humor — be genuine
+- After completing a task, briefly confirm what was done
+- For complex results, format them clearly
+- Use Vietnamese when user writes in Vietnamese, English when in English
+
+═══ LEARNING ═══
+- Track user's common commands and adapt
+- Remember preferred coding languages
+- Learn frequent file paths and project locations
+- Adapt to user's expertise level
+- Suggest improvements based on workflow patterns
+
+REMEMBER: You are an AGENT, not a chatbot. ACT, don't just talk.`;
 
 // ─── Legacy action-based prompt (fallback) ─────────────────────────
 
@@ -890,7 +1166,7 @@ Adapt responses based on these patterns.`;
       const db = await this.getDb();
       const sqlite = db.$client;
       sqlite.exec(`
-        CREATE TABLE IF NOT EXISTS conversation_context (
+        CREATE TABLE IF NOT EXISTS ai_conversation_context (
           user_id TEXT PRIMARY KEY,
           history TEXT NOT NULL DEFAULT '[]',
           last_action TEXT DEFAULT '{}',
@@ -918,7 +1194,7 @@ Adapt responses based on these patterns.`;
         updated_at: string;
       }
       const row = sqlite.prepare(
-        'SELECT history, last_action FROM conversation_context WHERE user_id = ?'
+        'SELECT history, last_action FROM ai_conversation_context WHERE user_id = ?'
       ).get(userId) as ConversationRow | undefined;
       if (row) {
         this.conversationContext.set(userId, JSON.parse(row.history ?? '[]'));
@@ -944,7 +1220,7 @@ Adapt responses based on these patterns.`;
       const now = new Date().toISOString();
 
       sqlite.prepare(`
-        INSERT OR REPLACE INTO conversation_context (user_id, history, last_action, updated_at)
+        INSERT OR REPLACE INTO ai_conversation_context (user_id, history, last_action, updated_at)
         VALUES (?, ?, ?, ?)
       `).run(userId, JSON.stringify(history), JSON.stringify(lastAct), now);
     } catch (err) {
@@ -1088,7 +1364,7 @@ Adapt responses based on these patterns.`;
    */
   async interpretWithAI(text: string, userId?: string): Promise<MatchedIntent | null> {
     // Check cache first (but NOT for free_response type — those are unique)
-    const cacheKey = hashString(text.toLowerCase().trim());
+    const cacheKey = hashString(`${userId ?? 'anon'}:${text.toLowerCase().trim()}`);
     const cached = this.responseCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS && cached.intent.type !== 'free_response') {
       logger.debug({ text }, 'AI response cache hit');
@@ -1101,40 +1377,46 @@ Adapt responses based on these patterns.`;
     }
 
     const processedText = text.trim();
+    const taskComplexity = detectComplexity(processedText);
 
     try {
-      const selectedModel = selectModel(processedText);
-      logger.info({ text: processedText.slice(0, 100), model: selectedModel }, 'Calling Gemini API with function calling');
+      const bestModel = modelManager.getBestModel(taskComplexity);
+      const selectedModel = bestModel?.id ?? 'gemini-3.1-flash-lite';
+      logger.info({ text: processedText.slice(0, 100), model: selectedModel, complexity: taskComplexity }, 'Calling Gemini API with function calling');
 
-      // Build context-aware prompt
+      // Build context-aware prompt using ConversationMemory
       let contextPrefix = '';
       if (userId) {
-        const history = await this.getContext(userId);
-        if (history.length > 0) {
-          const historyText = history.slice(-20).map(m => `${m.role}: ${m.content.slice(0, 2000)}`).join('\n');
-          contextPrefix = `\n\nConversation history:\n${historyText}`;
-        }
-
-        // Add last action context for pronoun resolution
-        const last = await this.getLastAction(userId);
-        if (last && Date.now() - last.timestamp < 30 * 60 * 1000) {
-          const paramsStr = JSON.stringify(last.params).slice(0, 1000);
-          contextPrefix += `\n\nLast action: type=${last.type}, params=${paramsStr}`;
-
-          if (last.params.path) {
-            contextPrefix += `\nFull file path: ${last.params.path}`;
-          } else if (last.params.filename) {
-            const desktop = process.env.USERPROFILE ? `${process.env.USERPROFILE}\\Desktop` : 'C:\\Users\\Admin\\Desktop';
-            contextPrefix += `\nFull file path: ${desktop}\\${last.params.filename}`;
+        try {
+          const { getConversationMemory } = await import('./conversation-memory.js');
+          const memory = getConversationMemory();
+          const memoryContext = await memory.buildContextForAI(userId);
+          if (memoryContext) {
+            contextPrefix = memoryContext;
+          }
+        } catch (err) {
+          // Fallback to old in-memory context if ConversationMemory fails
+          logger.debug({ err }, 'ConversationMemory unavailable, using fallback context');
+          const history = await this.getContext(userId);
+          if (history.length > 0) {
+            const historyText = history.slice(-20).map(m => `${m.role}: ${m.content.slice(0, 2000)}`).join('\n');
+            contextPrefix = `\n\nConversation history:\n${historyText}`;
           }
 
-          contextPrefix += `\nWhen user says "nó", "file đó", "thư mục đó" → use the FULL path from last action.`;
+          const last = await this.getLastAction(userId);
+          if (last && Date.now() - last.timestamp < 30 * 60 * 1000) {
+            const paramsStr = JSON.stringify(last.params).slice(0, 1000);
+            contextPrefix += `\n\nLast action: type=${last.type}, params=${paramsStr}`;
+            if (last.params.path) {
+              contextPrefix += `\nFull file path: ${last.params.path}`;
+            } else if (last.params.filename) {
+              const desktop = process.env.USERPROFILE ? `${process.env.USERPROFILE}\\Desktop` : 'C:\\Users\\Admin\\Desktop';
+              contextPrefix += `\nFull file path: ${desktop}\\${last.params.filename}`;
+            }
+            contextPrefix += `\nWhen user says "nó", "file đó", "thư mục đó" → use the FULL path from last action.`;
+          }
         }
       }
-
-      const userMessage = contextPrefix
-        ? `${contextPrefix}\n\nUser: "${processedText}"`
-        : `User: "${processedText}"`;
 
       // Detect user emotion (runtime, not just prompt)
       const emotion = detectEmotion(processedText);
@@ -1155,9 +1437,37 @@ Adapt responses based on these patterns.`;
       // Try function calling first (more reliable)
       const url = `${GEMINI_API_URL}/${selectedModel}:generateContent?key=${config.gemini.apiKey}`;
 
+      // Build multi-turn conversation contents
+      const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+
+      // Add conversation history as previous turns (last 10 turns)
+      if (userId) {
+        const history = await this.getContext(userId);
+        const recentHistory = history.slice(-10); // Last 10 turns
+
+        for (const turn of recentHistory) {
+          contents.push({
+            role: turn.role === 'user' ? 'user' : 'model',
+            parts: [{ text: turn.content.slice(0, 2000) }],
+          });
+        }
+      }
+
+      // Add context prefix as system-level context if available
+      let finalUserMessage = `User: "${processedText}"`;
+      if (contextPrefix) {
+        finalUserMessage = `${contextPrefix}\n\n${finalUserMessage}`;
+      }
+
+      // Add current user message
+      contents.push({
+        role: 'user',
+        parts: [{ text: finalUserMessage }],
+      });
+
       const requestBody = {
         systemInstruction: { parts: [{ text: systemPromptWithEmotion }] },
-        contents: [{ parts: [{ text: userMessage }] }],
+        contents,
         tools: [{
           functionDeclarations: GEMINI_FUNCTION_DECLARATIONS,
         }],
@@ -1167,15 +1477,26 @@ Adapt responses based on these patterns.`;
           topP: 0.95,
         },
         safetySettings: [
-          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' },
         ],
       };
 
-      const responseData = await callGeminiWithFallback(url, requestBody, 120_000);
+      const responseData = await callGeminiWithFallback(url, requestBody, 120_000, taskComplexity);
       const candidate = responseData.candidates?.[0];
+
+      // Record token usage
+      if (responseData.usageMetadata && userId) {
+        recordUsage(
+          userId,
+          selectedModel,
+          responseData.usageMetadata.promptTokenCount ?? 0,
+          responseData.usageMetadata.candidatesTokenCount ?? 0,
+          'function_calling',
+        );
+      }
 
       if (!candidate) {
         logger.warn({ responseData: JSON.stringify(responseData) }, 'Gemini returned no candidates');
@@ -1361,6 +1682,58 @@ Adapt responses based on these patterns.`;
         type: 'desktop_keys',
         paramMapper: (a) => ({ keys: a.keys }),
       },
+      edit_file: {
+        type: 'edit_file',
+        paramMapper: (a) => ({ path: a.path, find: a.find, replace: a.replace, content: a.content }),
+      },
+      calculate: {
+        type: 'calculate',
+        paramMapper: (a) => ({ expression: a.expression }),
+      },
+      translate_text: {
+        type: 'translate_text',
+        paramMapper: (a) => ({ text: a.text, targetLanguage: a.targetLanguage, sourceLanguage: a.sourceLanguage }),
+      },
+      git_operations: {
+        type: 'git_operations',
+        paramMapper: (a) => ({ operation: a.operation, args: a.args, path: a.path }),
+      },
+      send_email: {
+        type: 'send_email',
+        paramMapper: (a) => ({ to: a.to, subject: a.subject, body: a.body }),
+      },
+      database_query: {
+        type: 'database_query',
+        paramMapper: (a) => ({ query: a.query, database: a.database }),
+      },
+      api_call: {
+        type: 'api_call',
+        paramMapper: (a) => ({ url: a.url, method: a.method ?? 'GET', headers: a.headers, body: a.body }),
+      },
+      create_reminder: {
+        type: 'create_reminder',
+        paramMapper: (a) => ({ title: a.title, time: a.time, recurring: a.recurring }),
+      },
+      read_clipboard: {
+        type: 'get_clipboard',
+        paramMapper: () => ({}),
+      },
+      write_clipboard: {
+        type: 'set_clipboard',
+        paramMapper: (a) => ({ content: a.content }),
+      },
+      get_weather: {
+        type: 'get_weather',
+        paramMapper: (a) => ({ location: a.location }),
+      },
+      manage_todo: {
+        type: 'manage_todo',
+        paramMapper: (a) => ({ action: a.action, title: a.title, taskId: a.taskId, priority: a.priority }),
+      },
+      generate_image: {
+        type: 'generate_image',
+        paramMapper: (a) => ({ prompt: a.prompt, style: a.style }),
+      },
     };
 
     const mapping = functionMap[name];
@@ -1414,7 +1787,8 @@ Adapt responses based on these patterns.`;
       return;
     }
 
-    const selectedModel = selectModel(text);
+    const bestModel = modelManager.getBestModel(detectComplexity(text));
+    const selectedModel = bestModel?.id ?? 'gemini-3.1-flash-lite';
 
     // Build context
     let contextPrefix = '';
